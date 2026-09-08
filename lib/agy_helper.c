@@ -337,7 +337,7 @@ static int fetch_latest_release_tag(enum update_check_mode mode, char *latest_ta
     }
 
     // Intentionally uses the shell for a bounded curl request.
-    // NOLINTNEXTLINE(bugprone-command-processor,cert-env33-c)
+    // NOLINTNEXTLINE(bugprone-command-processor,cert-env33-c,clang-analyzer-optin.taint.GenericTaint)
     FILE *pipe = popen(command, "r");
     if (pipe == NULL) {
         report_update_check_error(mode, "could not start the release query");
@@ -454,7 +454,7 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
     }
 
     // Intentionally uses the shell for a staged, rollback-safe two-file replacement.
-    // NOLINTNEXTLINE(bugprone-command-processor,cert-env33-c,cert-err34-c,cert-str02-c)
+    // NOLINTNEXTLINE(bugprone-command-processor,cert-env33-c,cert-err34-c,cert-str02-c,clang-analyzer-optin.taint.GenericTaint)
     return system(update_cmd);
 }
 
@@ -703,10 +703,11 @@ static void ensure_termux_shell_bridge(const char *prefix) {
 
     FILE *fp = fopen(script_path, "w");
     if (fp != NULL) {
-        (void)fprintf(fp, "#!/system/bin/sh\n"
-                          "export LD_PRELOAD=\"%s\"\n"
-                          "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
-                          "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
+        (void)fprintf(fp,
+                      "#!/system/bin/sh\n"
+                      "export LD_PRELOAD=\"%s\"\n"
+                      "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
+                      "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
                       bionic_preload, real_shell, real_shell);
         (void)fclose(fp);
         (void)chmod(script_path, 0755);
@@ -729,7 +730,8 @@ static void setup_termux_environment(const char *prefix) {
     setenv("GODEBUG", "netdns=cgo", 1);
 
     // SSL certificates for Go / curl / OpenSSL.
-    if (snprintf(path_buf, sizeof(path_buf), "%s/etc/tls/cert.pem", prefix) < (int)sizeof(path_buf)) {
+    if (snprintf(path_buf, sizeof(path_buf), "%s/etc/tls/cert.pem", prefix) <
+        (int)sizeof(path_buf)) {
         setenv("SSL_CERT_FILE", path_buf, 1);
 
         // SSL certificates for Node.js / MCP servers.
@@ -743,7 +745,8 @@ static void setup_termux_environment(const char *prefix) {
         if (access(path_buf, F_OK) != 0) {
             (void)mkdir(path_buf, 0700);
         }
-        if (getenv("TMPDIR") == NULL || getenv("TMPDIR")[0] == '\0') {
+        const char *env_tmp = getenv("TMPDIR");
+        if (env_tmp == NULL || env_tmp[0] == '\0') {
             setenv("TMPDIR", path_buf, 1);
         }
     }
@@ -755,7 +758,8 @@ static void setup_termux_environment(const char *prefix) {
 
     // Default browser handler for Termux OAuth authentication flows.
     if (getenv("BROWSER") == NULL) {
-        if (snprintf(path_buf, sizeof(path_buf), "%s/bin/termux-open-url", prefix) < (int)sizeof(path_buf)) {
+        if (snprintf(path_buf, sizeof(path_buf), "%s/bin/termux-open-url", prefix) <
+            (int)sizeof(path_buf)) {
             if (access(path_buf, X_OK) == 0) {
                 setenv("BROWSER", path_buf, 0);
             }
@@ -787,6 +791,17 @@ static int resolve_qemu_for_cpu(const char *prefix, char *qemu_path, size_t qemu
     (void)fprintf(stderr, "[agy-termux] CPU lacks LSE atomics, and qemu-aarch64 was not found.\n");
     (void)fprintf(stderr, "[agy-termux] You may need to install the qemu-user-aarch64 package.\n");
     return 0;
+}
+
+static int dispatch_update_command(const char *dir, int argc, char **argv,
+                                   const char *prefix_path) {
+    if (update_command_requests_help(argc, argv)) {
+        return handle_update_command(dir, argc, argv);
+    }
+    if (!require_resolver_config(prefix_path)) {
+        return 1;
+    }
+    return handle_update_command(dir, argc, argv);
 }
 
 int main(int argc, char **argv) {
@@ -852,13 +867,7 @@ int main(int argc, char **argv) {
     dir = dirname(exec_path);
 
     if (is_update_command(argc, argv)) {
-        if (update_command_requests_help(argc, argv)) {
-            return handle_update_command(dir, argc, argv);
-        }
-        if (!require_resolver_config(prefix_path)) {
-            return 1;
-        }
-        return handle_update_command(dir, argc, argv);
+        return dispatch_update_command(dir, argc, argv, prefix_path);
     }
 
     if (!require_resolver_config(prefix_path)) {
