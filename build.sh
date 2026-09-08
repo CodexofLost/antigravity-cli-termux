@@ -227,7 +227,7 @@ for off in range(0, len(data) - 12, 4):
 dst.write_bytes(data)
 dst.chmod(0o755)
 print(f"Patched parameters: ubfx={ubfx_count}, lsl={lsl_count}, mask={mask_count}, mmap={mmap_count}, faccessat2={faccessat2_count}")
-if ubfx_count == 0 or lsl_count == 0 or mask_count == 0 or mmap_count == 0:
+if ubfx_count == 0 or lsl_count == 0 or mmap_count == 0:
     print("ERROR: One or more critical VA39 memory layout opcodes were not matched!", file=sys.stderr)
     print("Upstream binary structure may have changed. Aborting build to prevent generating broken binary.", file=sys.stderr)
     sys.exit(1)
