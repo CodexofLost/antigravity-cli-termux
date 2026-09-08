@@ -46,8 +46,17 @@
   - Sets `GIT_DISCOVERY_ACROSS_FILESYSTEM=1` to allow git discovery across Android shared storage (`/storage/emulated/0`) FUSE mount boundaries.
   - Sets `BROWSER=termux-open-url` (if unset) for native Android browser launch in OAuth authentication.
   - Guarantees UTF-8 locale (`LANG=en_US.UTF-8` fallback).
-  - Verifies presence of `$PREFIX/etc/resolv.conf`, automatically writing a fallback configuration with public nameservers (`1.1.1.1`, `8.8.8.8`) if missing.
+  - Automatically bootstraps Termux storage symlink hierarchy (`$HOME/storage/shared -> /storage/emulated/0`) on startup if accessible, or emits a friendly one-line permission notice if ungranted.
+  - Dynamically synchronizes active Android system DNS properties (`net.dns1`, `net.dns2`) into `$PREFIX/etc/resolv.conf` and ensures `$PREFIX/glibc/etc/resolv.conf` symlinking, falling back to public nameservers (`1.1.1.1`, `8.8.8.8`) when properties are absent or on captive portals.
   - Verifies presence of `$PREFIX/etc/hosts`, automatically writing `localhost` and `ip6-localhost` mappings if missing.
+- **Process Group, Subreaper & Zombie Supervision:**
+  - Designates bootstrapper as subreaper via `prctl(PR_SET_CHILD_SUBREAPER, 1)` to adopt and reap orphaned grandchildren (such as JVM `maven-tools-mcp.jar` or background Node.js processes).
+  - Establishes a dedicated process group (`setpgid(0, 0)`) and safely preserves interactive foreground terminal ownership (`tcsetpgrp`).
+  - Sets `prctl(PR_SET_PDEATHSIG, SIGTERM)` on child engine to ensure clean teardown if parent terminates.
+  - Installs signal handlers for `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT` broadcasting to `kill(-getpgrp(), sig)`.
+  - Non-blocking `waitpid(-1, &status, WNOHANG)` reaper on `SIGCHLD` prevents defunct/zombie process accumulation.
+  - Transparently relays `SIGWINCH` to child engine on Android virtual keyboard toggle and screen orientation changes.
+  - Propagates exact child exit status or signal code (`128 + sig`).
 - **Subshell Shebang Execution Bridge & Non-Interactive Environment:**
   - Automatically manages `$PREFIX/libexec/agy/termux-shell` (executable `0755`) and `$PREFIX/libexec/agy/termux-shell-env`.
   - Sets `SHELL=$PREFIX/libexec/agy/termux-shell`, `BASH_ENV=$PREFIX/libexec/agy/termux-shell-env`, `ENV=$PREFIX/libexec/agy/termux-shell-env`, and `AGY_REAL_SHELL` to the user's real shell (bash/zsh).
@@ -58,6 +67,7 @@
 - **Resilient Transactional Self-Update & Semantic Versioning:**
   - Configurable repository targeting: uses `CodexofLost/antigravity-cli-termux` by default, with dynamic runtime override via `AGY_UPDATE_REPO`.
   - Resilient network fetching: bounded curl downloads with `--connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2`.
+  - Pre-extraction archive integrity validation via `tar -tzf` and optional SHA256 checksum verification (`.sha256`).
   - Guaranteed ext4 staging (`$install_dir/../tmp`) preventing Android shared storage `noexec` execution check failures.
   - In-place atomic zero-copy `mv` replacements saving 400MB of flash writes per update.
   - Startup update check automatically re-execs `execv(exec_path, argv)` so newly installed bootstrapper features activate immediately.

@@ -1,18 +1,29 @@
+#include <arpa/inet.h>
 #include <asm/hwcap.h>
 #include <ctype.h>
 #include <errno.h>
 #include <libgen.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef HWCAP_ATOMICS
 #define HWCAP_ATOMICS (1 << 8)
+#endif
+
+#ifndef PR_SET_CHILD_SUBREAPER
+#define PR_SET_CHILD_SUBREAPER 36
+#endif
+
+#ifndef PR_SET_PDEATHSIG
+#define PR_SET_PDEATHSIG 1
 #endif
 
 #ifndef AGY_TERMUX_VERSION
@@ -437,6 +448,17 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "-fLsL -o \"$tmp/antigravity-termux-standalone.tar.gz\" "
         "\"https://github.com/%s/releases/download/"
         "$release_tag/antigravity-termux-standalone.tar.gz\" && "
+        "sha_url=\"https://github.com/%s/releases/download/"
+        "$release_tag/antigravity-termux-standalone.tar.gz.sha256\"; "
+        "if curl --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 -fLsL "
+        "-o \"$tmp/archive.sha256\" \"$sha_url\" 2>/dev/null; then "
+        "expected_sha=$(awk '{print $1}' \"$tmp/archive.sha256\"); "
+        "actual_sha=$(sha256sum \"$tmp/antigravity-termux-standalone.tar.gz\" | awk '{print $1}'); "
+        "if [ -n \"$expected_sha\" ] && [ -n \"$actual_sha\" ] && "
+        "[ \"$expected_sha\" != \"$actual_sha\" ]; then "
+        "printf '[agy-termux] Error: SHA256 checksum mismatch.\\n' >&2; exit 1; fi; "
+        "fi; "
+        "tar -tzf \"$tmp/antigravity-termux-standalone.tar.gz\" >/dev/null && "
         "tar -xzf \"$tmp/antigravity-termux-standalone.tar.gz\" -C \"$tmp\" "
         "agy agy.va39 && "
         "test -s \"$tmp/agy\" && test -x \"$tmp/agy\" && "
@@ -449,7 +471,7 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "mv -f \"$new_payload\" \"$install_dir/agy.va39\" && "
         "mv -f \"$new_agy\" \"$install_dir/agy\" && "
         "committed=1 && { rm -f \"$old_agy\" \"$old_payload\" || :; }",
-        dir, get_agy_repo(), latest_tag);
+        dir, latest_tag, get_agy_repo(), get_agy_repo());
     if (written < 0 || written >= (int)sizeof(update_cmd)) {
         return -1;
     }
@@ -619,29 +641,113 @@ static void print_non_termux_message(void) {
                           "  curl -fsSL https://antigravity.google/cli/install.sh | bash\n");
 }
 
+static int is_valid_ip_address(const char *ip) {
+    if (ip == NULL || ip[0] == '\0') {
+        return 0;
+    }
+
+    struct in_addr addr4;
+    if (inet_pton(AF_INET, ip, &addr4) == 1) {
+        return 1;
+    }
+
+    struct in6_addr addr6;
+    if (inet_pton(AF_INET6, ip, &addr6) == 1) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int fetch_android_dns_property(const char *prop, char *buffer, size_t buffer_size) {
+    char cmd[128];
+    const char *getprop_bin =
+        (access("/system/bin/getprop", X_OK) == 0) ? "/system/bin/getprop" : "getprop";
+    int written = snprintf(cmd, sizeof(cmd), "%s %s", getprop_bin, prop);
+    if (written < 0 || written >= (int)sizeof(cmd)) {
+        return 0;
+    }
+
+    // NOLINTNEXTLINE(bugprone-command-processor,cert-env33-c,clang-analyzer-optin.taint.GenericTaint)
+    FILE *pipe = popen(cmd, "r");
+    if (pipe == NULL) {
+        return 0;
+    }
+
+    buffer[0] = '\0';
+    if (fgets(buffer, (int)buffer_size, pipe) != NULL) {
+        buffer[strcspn(buffer, "\r\n")] = '\0';
+    }
+    int prop_status = pclose(pipe);
+    if (prop_status != 0 || buffer[0] == '\0') {
+        return 0;
+    }
+
+    return is_valid_ip_address(buffer);
+}
+
 static int require_resolver_config(const char *prefix) {
     char resolv_path[PATH_MAX];
+    char glibc_resolv_path[PATH_MAX];
+    char glibc_etc_dir[PATH_MAX];
+
     int written = snprintf(resolv_path, sizeof(resolv_path), "%s/etc/resolv.conf", prefix);
     if (written < 0 || written >= (int)sizeof(resolv_path)) {
         return 0;
     }
-
-    if (access(resolv_path, R_OK) == 0) {
-        return 1;
+    written =
+        snprintf(glibc_resolv_path, sizeof(glibc_resolv_path), "%s/glibc/etc/resolv.conf", prefix);
+    if (written < 0 || written >= (int)sizeof(glibc_resolv_path)) {
+        return 0;
+    }
+    written = snprintf(glibc_etc_dir, sizeof(glibc_etc_dir), "%s/glibc/etc", prefix);
+    if (written < 0 || written >= (int)sizeof(glibc_etc_dir)) {
+        return 0;
     }
 
-    // Auto-generate a fallback resolv.conf with reliable public DNS
-    FILE *fp = fopen(resolv_path, "w");
-    if (fp != NULL) {
-        (void)fputs("options timeout:2 attempts:2\n"
-                    "nameserver 1.1.1.1\n"
-                    "nameserver 8.8.8.8\n"
-                    "nameserver 8.8.4.4\n",
-                    fp);
-        (void)fclose(fp);
-        if (access(resolv_path, R_OK) == 0) {
-            return 1;
+    char dns1[64] = {0};
+    char dns2[64] = {0};
+    int has_dns1 = fetch_android_dns_property("net.dns1", dns1, sizeof(dns1));
+    int has_dns2 = fetch_android_dns_property("net.dns2", dns2, sizeof(dns2));
+
+    if (has_dns1 || has_dns2) {
+        FILE *fp = fopen(resolv_path, "w");
+        if (fp != NULL) {
+            (void)fputs("options timeout:2 attempts:2\n", fp);
+            if (has_dns1) {
+                (void)fprintf(fp, "nameserver %s\n", dns1);
+            }
+            if (has_dns2 && strcmp(dns1, dns2) != 0) {
+                (void)fprintf(fp, "nameserver %s\n", dns2);
+            }
+            (void)fputs("nameserver 1.1.1.1\n"
+                        "nameserver 8.8.8.8\n",
+                        fp);
+            (void)fclose(fp);
         }
+    } else if (access(resolv_path, R_OK) != 0) {
+        // Auto-generate a fallback resolv.conf with reliable public DNS
+        FILE *fp = fopen(resolv_path, "w");
+        if (fp != NULL) {
+            (void)fputs("options timeout:2 attempts:2\n"
+                        "nameserver 1.1.1.1\n"
+                        "nameserver 8.8.8.8\n"
+                        "nameserver 8.8.4.4\n",
+                        fp);
+            (void)fclose(fp);
+        }
+    }
+
+    // Ensure glibc resolv.conf is linked or synchronized
+    if (access(glibc_resolv_path, F_OK) != 0) {
+        if (access(glibc_etc_dir, F_OK) != 0) {
+            (void)mkdir(glibc_etc_dir, 0755);
+        }
+        (void)symlink(resolv_path, glibc_resolv_path);
+    }
+
+    if (access(resolv_path, R_OK) == 0 || access(glibc_resolv_path, R_OK) == 0) {
+        return 1;
     }
 
     (void)fprintf(stderr, "[agy-termux] Missing resolver configuration: %s\n", resolv_path);
@@ -836,6 +942,37 @@ static void ensure_termux_shell_bridge(const char *prefix) {
     }
 }
 
+static void bootstrap_termux_storage(void) {
+    const char *storage_root = "/storage/emulated/0";
+    if (access(storage_root, R_OK | X_OK) != 0) {
+        (void)fprintf(stderr, "[agy-termux] Notice: Storage permission not granted. "
+                              "Run 'termux-setup-storage' to access device storage.\n");
+        return;
+    }
+
+    const char *home = getenv("HOME");
+    if (home == NULL || home[0] == '\0') {
+        home = "/data/data/com.termux/files/home";
+    }
+
+    char storage_dir[PATH_MAX];
+    char shared_link[PATH_MAX];
+
+    if (snprintf(storage_dir, sizeof(storage_dir), "%s/storage", home) >=
+            (int)sizeof(storage_dir) ||
+        snprintf(shared_link, sizeof(shared_link), "%s/storage/shared", home) >=
+            (int)sizeof(shared_link)) {
+        return;
+    }
+
+    if (access(shared_link, F_OK) != 0) {
+        if (access(storage_dir, F_OK) != 0) {
+            (void)mkdir(storage_dir, 0755);
+        }
+        (void)symlink(storage_root, shared_link);
+    }
+}
+
 static void setup_termux_environment(const char *prefix) {
     char path_buf[PATH_MAX];
 
@@ -896,6 +1033,9 @@ static void setup_termux_environment(const char *prefix) {
     // Ensure localhost host mapping.
     (void)ensure_hosts_config(prefix);
 
+    // Bootstrap Termux storage symlink hierarchy if missing.
+    bootstrap_termux_storage();
+
     // Ensure installed agentapi CLI shim and heal corrupted home shim.
     ensure_installed_agentapi(prefix);
     self_heal_agentapi_shim(prefix);
@@ -933,6 +1073,161 @@ static int dispatch_update_command(const char *dir, int argc, char **argv,
         return 1;
     }
     return handle_update_command(dir, argc, argv);
+}
+
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile pid_t g_child_pid = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile sig_atomic_t g_child_exited = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile int g_child_exit_status = 0;
+
+static void handle_forward_signal(int sig) {
+    // Avoid receiving our own forwarded signal by temporarily ignoring it
+    struct sigaction sa_ign;
+    memset(&sa_ign, 0, sizeof(sa_ign));
+    sa_ign.sa_handler = SIG_IGN;
+    sigemptyset(&sa_ign.sa_mask);
+    (void)sigaction(sig, &sa_ign, NULL);
+
+    (void)kill(-getpgrp(), sig);
+
+    // Re-arm the forward signal handler
+    struct sigaction sa_fwd;
+    memset(&sa_fwd, 0, sizeof(sa_fwd));
+    sa_fwd.sa_handler = handle_forward_signal;
+    sa_fwd.sa_flags = SA_RESTART;
+    sigemptyset(&sa_fwd.sa_mask);
+    (void)sigaction(sig, &sa_fwd, NULL);
+}
+
+static void handle_sigchld(int sig) {
+    (void)sig;
+    int saved_errno = errno;
+    int status = 0;
+    pid_t pid = 0;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (pid == g_child_pid) {
+            g_child_exited = 1;
+            g_child_exit_status = status;
+        }
+    }
+    errno = saved_errno;
+}
+
+static void handle_sigwinch(int sig) {
+    (void)sig;
+    if (g_child_pid > 0) {
+        (void)kill(g_child_pid, SIGWINCH);
+    }
+}
+
+static int supervise_engine_process(const char *exec_target, char **new_argv,
+                                    const char *exec_error) {
+    // Designate this bootstrapper as a subreaper to adopt orphaned grandchildren.
+    (void)prctl(PR_SET_CHILD_SUBREAPER, 1UL, 0UL, 0UL, 0UL);
+
+    // Establish a clean process group and maintain terminal foreground control if interactive.
+    if (setpgid(0, 0) == 0 && isatty(STDIN_FILENO)) {
+        struct sigaction sa_ttou_ign;
+        memset(&sa_ttou_ign, 0, sizeof(sa_ttou_ign));
+        sa_ttou_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ttou_ign.sa_mask);
+        struct sigaction sa_ttou_old;
+        memset(&sa_ttou_old, 0, sizeof(sa_ttou_old));
+        (void)sigaction(SIGTTOU, &sa_ttou_ign, &sa_ttou_old);
+        (void)tcsetpgrp(STDIN_FILENO, getpid());
+        (void)sigaction(SIGTTOU, &sa_ttou_old, NULL);
+    }
+
+    sigset_t block_mask;
+    sigset_t prev_mask;
+    sigemptyset(&block_mask);
+    sigaddset(&block_mask, SIGCHLD);
+    sigaddset(&block_mask, SIGINT);
+    sigaddset(&block_mask, SIGTERM);
+    sigaddset(&block_mask, SIGHUP);
+    sigaddset(&block_mask, SIGQUIT);
+    sigprocmask(SIG_BLOCK, &block_mask, &prev_mask);
+
+    struct sigaction sa_fwd;
+    memset(&sa_fwd, 0, sizeof(sa_fwd));
+    sa_fwd.sa_handler = handle_forward_signal;
+    sa_fwd.sa_flags = SA_RESTART;
+    sigemptyset(&sa_fwd.sa_mask);
+    (void)sigaction(SIGINT, &sa_fwd, NULL);
+    (void)sigaction(SIGTERM, &sa_fwd, NULL);
+    (void)sigaction(SIGHUP, &sa_fwd, NULL);
+    (void)sigaction(SIGQUIT, &sa_fwd, NULL);
+
+    struct sigaction sa_chld;
+    memset(&sa_chld, 0, sizeof(sa_chld));
+    sa_chld.sa_handler = handle_sigchld;
+    sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigemptyset(&sa_chld.sa_mask);
+    (void)sigaction(SIGCHLD, &sa_chld, NULL);
+
+    struct sigaction sa_winch;
+    memset(&sa_winch, 0, sizeof(sa_winch));
+    sa_winch.sa_handler = handle_sigwinch;
+    sa_winch.sa_flags = SA_RESTART;
+    sigemptyset(&sa_winch.sa_mask);
+    (void)sigaction(SIGWINCH, &sa_winch, NULL);
+
+    pid_t parent_pid = getpid();
+    pid_t child_pid = fork();
+    if (child_pid < 0) {
+        perror("[agy-termux] fork failed");
+        free(new_argv);
+        return 1;
+    }
+
+    if (child_pid == 0) {
+        (void)signal(SIGINT, SIG_DFL);
+        (void)signal(SIGTERM, SIG_DFL);
+        (void)signal(SIGHUP, SIG_DFL);
+        (void)signal(SIGQUIT, SIG_DFL);
+        (void)signal(SIGCHLD, SIG_DFL);
+        (void)signal(SIGWINCH, SIG_DFL);
+
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+        // Die if parent supervisor exits unexpectedly
+        (void)prctl(PR_SET_PDEATHSIG, (unsigned long)SIGTERM, 0UL, 0UL, 0UL);
+        if (getppid() != parent_pid) {
+            _exit(1);
+        }
+
+        // NOLINTNEXTLINE(clang-analyzer-optin.taint.GenericTaint)
+        if (execv(exec_target, new_argv) == -1) {
+            perror(exec_error);
+            free(new_argv);
+            _exit(127);
+        }
+    }
+
+    g_child_pid = child_pid;
+    free(new_argv);
+
+    while (!g_child_exited) {
+        sigsuspend(&prev_mask);
+    }
+
+    // Broadcast SIGTERM to any lingering processes in our process group (e.g. JVM/Node MCP servers)
+    (void)kill(-getpgrp(), SIGTERM);
+
+    // Reap all orphaned grandchildren adopted via PR_SET_CHILD_SUBREAPER
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+    }
+
+    int exit_code = 0;
+    if (WIFEXITED(g_child_exit_status)) {
+        exit_code = WEXITSTATUS(g_child_exit_status);
+    } else if (WIFSIGNALED(g_child_exit_status)) {
+        exit_code = 128 + WTERMSIG(g_child_exit_status);
+    }
+
+    return exit_code;
 }
 
 int main(int argc, char **argv) {
@@ -1058,10 +1353,5 @@ int main(int argc, char **argv) {
     }
     new_argv[arg_idx] = NULL;
 
-    // NOLINTNEXTLINE(clang-analyzer-optin.taint.GenericTaint)
-    if (execv(exec_target, new_argv) == -1) {
-        perror(exec_error);
-        free(new_argv);
-        return 1;
-    }
+    return supervise_engine_process(exec_target, new_argv, exec_error);
 }
