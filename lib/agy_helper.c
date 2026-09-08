@@ -18,9 +18,17 @@
 #define AGY_TERMUX_VERSION "1.0.2"
 #endif
 
-#define AGY_LATEST_RELEASE_URL "https://github.com/wallentx/antigravity-cli-termux/releases/latest"
-#define AGY_RELEASE_TAG_URL_PREFIX                                                                 \
-    "https://github.com/wallentx/antigravity-cli-termux/releases/tag/"
+#ifndef AGY_GITHUB_REPO
+#define AGY_GITHUB_REPO "CodexofLost/antigravity-cli-termux"
+#endif
+
+static const char *get_agy_repo(void) {
+    const char *env_repo = getenv("AGY_UPDATE_REPO");
+    if (env_repo != NULL && env_repo[0] != '\0') {
+        return env_repo;
+    }
+    return AGY_GITHUB_REPO;
+}
 
 enum update_check_mode {
     UPDATE_CHECK_EXPLICIT,
@@ -287,11 +295,18 @@ static void report_update_check_error(enum update_check_mode mode, const char *m
 }
 
 static int extract_release_tag(const char *release_url, char *tag, size_t tag_size) {
-    const size_t prefix_length = strlen(AGY_RELEASE_TAG_URL_PREFIX);
+    char tag_prefix[PATH_MAX];
+    int written = snprintf(tag_prefix, sizeof(tag_prefix), "https://github.com/%s/releases/tag/",
+                           get_agy_repo());
+    if (written < 0 || written >= (int)sizeof(tag_prefix)) {
+        return 0;
+    }
+
+    const size_t prefix_length = (size_t)written;
     const char *tag_start = NULL;
     size_t tag_length = 0;
 
-    if (strncmp(release_url, AGY_RELEASE_TAG_URL_PREFIX, prefix_length) != 0) {
+    if (strncmp(release_url, tag_prefix, prefix_length) != 0) {
         return 0;
     }
 
@@ -309,12 +324,12 @@ static int fetch_latest_release_tag(enum update_check_mode mode, char *latest_ta
                                     size_t latest_tag_size) {
     char command[768];
     char release_url[PATH_MAX] = {0};
-    int written =
-        snprintf(command, sizeof(command),
-                 "command -v curl >/dev/null 2>&1 && "
-                 "curl --proto '=https' --tlsv1.2 --connect-timeout 2 --max-time 5 -fLsL "
-                 "-o /dev/null -w '%%{url_effective}\\n' -H 'User-Agent: Termux-Agy' '%s'",
-                 AGY_LATEST_RELEASE_URL);
+    int written = snprintf(command, sizeof(command),
+                           "command -v curl >/dev/null 2>&1 && "
+                           "curl --proto '=https' --tlsv1.2 --connect-timeout 2 --max-time 5 -fLsL "
+                           "-o /dev/null -w '%%{url_effective}\\n' -H 'User-Agent: Termux-Agy' "
+                           "'https://github.com/%s/releases/latest'",
+                           get_agy_repo());
     if (written < 0 || written >= (int)sizeof(command)) {
         report_update_check_error(mode, "could not construct the release query");
         return 0;
@@ -416,7 +431,7 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "if [ \"$rollback_failed\" -ne 0 ]; then exit 125; fi; exit \"$status\"; }; "
         "trap cleanup EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; "
         "curl -fsSL -o \"$tmp/antigravity-termux-standalone.tar.gz\" "
-        "\"https://github.com/wallentx/antigravity-cli-termux/releases/download/"
+        "\"https://github.com/%s/releases/download/"
         "$release_tag/antigravity-termux-standalone.tar.gz\" && "
         "tar -xzf \"$tmp/antigravity-termux-standalone.tar.gz\" -C \"$tmp\" "
         "agy agy.va39 && "
@@ -432,7 +447,7 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "mv -f \"$new_payload\" \"$install_dir/agy.va39\" && "
         "mv -f \"$new_agy\" \"$install_dir/agy\" && "
         "committed=1 && { rm -f \"$old_agy\" \"$old_payload\" || :; }",
-        dir, latest_tag);
+        dir, get_agy_repo(), latest_tag);
     if (written < 0 || written >= (int)sizeof(update_cmd)) {
         return -1;
     }
@@ -447,7 +462,7 @@ static void check_and_perform_update(enum update_check_mode mode, const char *di
                                      int auto_update) {
     char latest_tag[64] = {0};
     if (mode == UPDATE_CHECK_EXPLICIT) {
-        printf("[agy-termux] Querying latest release from wallentx/antigravity-cli-termux...\n");
+        printf("[agy-termux] Querying latest release from %s...\n", get_agy_repo());
     }
     if (!fetch_latest_release_tag(mode, latest_tag, sizeof(latest_tag))) {
         return;
@@ -608,16 +623,29 @@ static int require_resolver_config(const char *prefix) {
         return 0;
     }
 
-    if (access(resolv_path, R_OK) != 0) {
-        (void)fprintf(stderr, "[agy-termux] Missing resolver configuration: %s\n", resolv_path);
-        (void)fprintf(stderr, "[agy-termux] Install it with: pkg install resolv-conf\n");
-        (void)fprintf(stderr,
-                      "[agy-termux] Without this file, login and OAuth network requests may "
-                      "fail.\n");
-        return 0;
+    if (access(resolv_path, R_OK) == 0) {
+        return 1;
     }
 
-    return 1;
+    // Auto-generate a fallback resolv.conf with reliable public DNS
+    FILE *fp = fopen(resolv_path, "w");
+    if (fp != NULL) {
+        (void)fputs("options timeout:2 attempts:2\n"
+                    "nameserver 1.1.1.1\n"
+                    "nameserver 8.8.8.8\n"
+                    "nameserver 8.8.4.4\n",
+                    fp);
+        (void)fclose(fp);
+        if (access(resolv_path, R_OK) == 0) {
+            return 1;
+        }
+    }
+
+    (void)fprintf(stderr, "[agy-termux] Missing resolver configuration: %s\n", resolv_path);
+    (void)fprintf(stderr, "[agy-termux] Install it with: pkg install resolv-conf\n");
+    (void)fprintf(stderr, "[agy-termux] Without this file, login and OAuth network requests may "
+                          "fail.\n");
+    return 0;
 }
 
 static int resolve_qemu_for_cpu(const char *prefix, char *qemu_path, size_t qemu_path_len,
@@ -648,6 +676,8 @@ int main(int argc, char **argv) {
     char cert_path[PATH_MAX];
     char prefix_path[PATH_MAX];
     char qemu_path[PATH_MAX];
+    char preload_lib[PATH_MAX];
+    const char *preload = NULL;
     const char *prefix = getenv("PREFIX");
     const char *loader = NULL;
     const char *dir = NULL;
@@ -691,6 +721,11 @@ int main(int argc, char **argv) {
     unsetenv("LD_PRELOAD");
     unsetenv("LD_LIBRARY_PATH");
 
+    // Ensure UTF-8 locale is configured for glibc.
+    if (getenv("LANG") == NULL) {
+        setenv("LANG", "en_US.UTF-8", 0);
+    }
+
     // Set dynamic Go resolver and SSL configuration.
     setenv("GODEBUG", "netdns=cgo", 1);
     written = snprintf(cert_path, sizeof(cert_path), "%s/etc/tls/cert.pem", prefix_path);
@@ -728,6 +763,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Check for glibc libtermux-exec wrapper for standard path rewriting (/bin/sh, /usr/bin/env).
+    written =
+        snprintf(preload_lib, sizeof(preload_lib), "%s/glibc/lib/libtermux-exec.so", prefix_path);
+    if (written > 0 && written < (int)sizeof(preload_lib) && access(preload_lib, R_OK) == 0) {
+        preload = preload_lib;
+    }
+
     // Construct path to the patched binary
     written = snprintf(patched_bin, sizeof(patched_bin), "%s/agy.va39", dir);
     if (written < 0 || written >= (int)sizeof(patched_bin)) {
@@ -735,8 +777,8 @@ int main(int argc, char **argv) {
     }
 
     // We allocate enough space for: qemu + loader + "--library-path" + lib_path
-    // + patched_bin + user args + NULL
-    int new_argc = argc + 6;
+    // + "--preload" + preload + "--argv0" + "agy" + patched_bin + user args + NULL
+    int new_argc = argc + 10;
     new_argv = malloc((size_t)new_argc * sizeof(*new_argv));
     if (!new_argv) {
         return 1;
@@ -751,6 +793,12 @@ int main(int argc, char **argv) {
     new_argv[arg_idx++] = (char *)loader;
     new_argv[arg_idx++] = "--library-path";
     new_argv[arg_idx++] = lib_path;
+    if (preload) {
+        new_argv[arg_idx++] = "--preload";
+        new_argv[arg_idx++] = (char *)preload;
+    }
+    new_argv[arg_idx++] = "--argv0";
+    new_argv[arg_idx++] = "agy";
     new_argv[arg_idx++] = patched_bin;
 
     for (int i = 1; i < argc; i++) {

@@ -51,41 +51,41 @@ jobs:
         with:
           checkout: false
 
-      - name: Sync dev with upstream main
+      - name: Sync dev with upstream wallentx/dev
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo "Adding upstream remote..."
-          git remote add upstream https://github.com/google-antigravity/antigravity-cli.git || \
-            git remote set-url upstream https://github.com/google-antigravity/antigravity-cli.git
+          echo "Adding upstream-port remote..."
+          git remote add upstream-port https://github.com/wallentx/antigravity-cli-termux.git || \
+            git remote set-url upstream-port https://github.com/wallentx/antigravity-cli-termux.git
 
           echo "Fetching origin/dev..."
           git fetch origin dev
 
-          echo "Fetching upstream/main..."
-          git fetch upstream main
+          echo "Fetching upstream-port/dev..."
+          git fetch upstream-port dev
 
           echo "Checking out dev from origin/dev..."
           git checkout -B dev origin/dev
 
-          read -r behind ahead < <(git rev-list --left-right --count upstream/main...HEAD)
-          echo "Before sync: dev is ${behind} commits behind and ${ahead} commits ahead of upstream/main."
+          read -r behind ahead < <(git rev-list --left-right --count upstream-port/dev...HEAD)
+          echo "Before sync: dev is ${behind} commits behind and ${ahead} commits ahead of upstream-port/dev."
 
           if [[ "$behind" != "0" ]]; then
-            echo "Merging upstream/main into dev..."
-            git merge --no-edit upstream/main
+            echo "Merging upstream-port/dev into dev..."
+            git merge --no-edit upstream-port/dev
           else
-            echo "dev is already caught up with upstream/main."
+            echo "dev is already caught up with upstream-port/dev."
           fi
 
-          read -r behind_after ahead_after < <(git rev-list --left-right --count upstream/main...HEAD)
-          echo "After sync: dev is ${behind_after} commits behind and ${ahead_after} commits ahead of upstream/main."
+          read -r behind_after ahead_after < <(git rev-list --left-right --count upstream-port/dev...HEAD)
+          echo "After sync: dev is ${behind_after} commits behind and ${ahead_after} commits ahead of upstream-port/dev."
 
           if [[ "$behind_after" != "0" ]]; then
-            echo "dev is still behind upstream/main after merge." >&2
+            echo "dev is still behind upstream-port/dev after merge." >&2
             exit 1
           fi
 

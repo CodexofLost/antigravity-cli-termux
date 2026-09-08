@@ -232,7 +232,8 @@ ok "Patched binary generated: bin/agy.va39"
 
 # Compile the native Termux C bootstrapper.
 info "Compiling native Termux C bootstrapper..."
-if ! "$local_cc" -O2 -DAGY_TERMUX_VERSION="\"$latest_version\"" -o bin/agy lib/agy_helper.c; then
+REPO_NAME="${AGY_REPO:-CodexofLost/antigravity-cli-termux}"
+if ! "$local_cc" -O2 -DAGY_TERMUX_VERSION="\"$latest_version\"" -DAGY_GITHUB_REPO="\"$REPO_NAME\"" -o bin/agy lib/agy_helper.c; then
   die "Compilation of lib/agy_helper.c failed."
 fi
 

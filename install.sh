@@ -2,7 +2,7 @@
 # Antigravity - Termux Installer
 set -Eeuo pipefail
 
-REPO="${AGY_REPO:-wallentx/antigravity-cli-termux}"
+REPO="${AGY_REPO:-CodexofLost/antigravity-cli-termux}"
 URL="${AGY_INSTALL_URL:-https://github.com/$REPO/releases/latest/download/antigravity-termux-standalone.tar.gz}"
 
 # ── Environment Detection ─────────────────────────────────────────────────────
@@ -244,12 +244,6 @@ command -v curl >/dev/null 2>&1  || die "curl is required"
 command -v tar  >/dev/null 2>&1  || die "tar is required"
 command -v install >/dev/null 2>&1 || die "install is required"
 
-GLIBC_LOADER="${TERMUX_PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
-if [[ ! -x "$GLIBC_LOADER" ]]; then
-  die "Missing Termux glibc loader: $GLIBC_LOADER
-You may need to install the glibc-repo and glibc packages, then rerun this installer."
-fi
-
 check_lse() {
   grep -q "atomics" /proc/cpuinfo
 }
@@ -257,6 +251,60 @@ check_lse() {
 check_qemu() {
   command -v qemu-aarch64 >/dev/null 2>&1
 }
+
+ensure_dependencies() {
+  local needed_pkgs=()
+
+  command -v curl >/dev/null 2>&1 || needed_pkgs+=("curl")
+  command -v tar >/dev/null 2>&1 || needed_pkgs+=("tar")
+  command -v install >/dev/null 2>&1 || needed_pkgs+=("coreutils")
+
+  local glibc_loader="${TERMUX_PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
+  if [[ ! -x "$glibc_loader" ]]; then
+    needed_pkgs+=("glibc")
+  fi
+
+  local ca_bundle="${TERMUX_PREFIX}/etc/tls/cert.pem"
+  if [[ ! -s "$ca_bundle" ]]; then
+    needed_pkgs+=("ca-certificates")
+  fi
+
+  local resolv_conf="${TERMUX_PREFIX}/etc/resolv.conf"
+  if [[ ! -r "$resolv_conf" ]]; then
+    needed_pkgs+=("resolv-conf")
+  fi
+
+  local glibc_exec="${TERMUX_PREFIX}/glibc/lib/libtermux-exec.so"
+  if [[ ! -f "$glibc_exec" ]]; then
+    needed_pkgs+=("termux-exec-glibc")
+  fi
+
+  if ! check_lse && ! check_qemu; then
+    needed_pkgs+=("qemu-user-aarch64")
+  fi
+
+  if [[ ${#needed_pkgs[@]} -gt 0 ]]; then
+    info "Resolving required Termux packages: ${needed_pkgs[*]}"
+    if command -v pkg >/dev/null 2>&1; then
+      pkg install -y glibc-repo 2>/dev/null || true
+      pkg install -y "${needed_pkgs[@]}" 2>/dev/null || true
+    fi
+  fi
+
+  # Proactive fallback for resolv.conf if still unreadable
+  if [[ ! -r "$resolv_conf" ]]; then
+    mkdir -p "$(dirname "$resolv_conf")" 2>/dev/null || true
+    printf "options timeout:2 attempts:2\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n" > "$resolv_conf" 2>/dev/null || true
+  fi
+}
+
+ensure_dependencies
+
+GLIBC_LOADER="${TERMUX_PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
+if [[ ! -x "$GLIBC_LOADER" ]]; then
+  die "Missing Termux glibc loader: $GLIBC_LOADER
+You may need to install the glibc-repo and glibc packages, then rerun this installer."
+fi
 
 CA_BUNDLE="${TERMUX_PREFIX}/etc/tls/cert.pem"
 if [[ ! -s "$CA_BUNDLE" ]]; then
@@ -332,7 +380,7 @@ divider
 info "Installed binaries to: ${BOLD}${INSTALL_BIN_DIR}${RESET}"
 info "Release archive kept at: ${BOLD}${TMP}${RESET}"
 info "Optional verification:"
-info "${BOLD}cd $(dirname "$TMP") && gh attestation verify antigravity-termux-standalone.tar.gz -R wallentx/antigravity-cli-termux${RESET}"
+info "${BOLD}cd $(dirname "$TMP") && gh attestation verify antigravity-termux-standalone.tar.gz -R ${REPO}${RESET}"
 printf '\n'
 
 case ":$PATH:" in

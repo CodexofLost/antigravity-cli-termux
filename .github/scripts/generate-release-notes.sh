@@ -58,7 +58,7 @@ escape_bash_replacement() {
 }
 
 # Render the final release notes from the template file
-REPO="${GITHUB_REPOSITORY:-wallentx/antigravity-cli-termux}"
+REPO="${GITHUB_REPOSITORY:-CodexofLost/antigravity-cli-termux}"
 OWNER="${REPO%/*}"
 
 TEMPLATE_PATH=".github/release-template.md"
