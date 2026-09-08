@@ -31,13 +31,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 🧰 Actions Toolbox
-        uses: wallentx/gh-actions/composite/actions-toolbox@main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          checkout: false
-
       - name: C Format and Tidy Paths
         id: c_format
         run: .github/scripts/ci-should-run.py c-format
@@ -62,7 +55,7 @@ jobs:
     name: C Format and Tidy
     needs: changes
     if: ${{ needs.changes.outputs.c_format == 'true' }}
-    uses: wallentx/gh-actions/.github/workflows/termux-run.yml@main
+    uses: ./.github/workflows/termux-run.yml
     with:
       packages: |
         clang
@@ -93,7 +86,7 @@ jobs:
     name: C Static Analysis
     needs: changes
     if: ${{ needs.changes.outputs.c_static == 'true' }}
-    uses: wallentx/gh-actions/.github/workflows/termux-run.yml@main
+    uses: ./.github/workflows/termux-run.yml
     with:
       packages: |
         cppcheck
@@ -118,7 +111,7 @@ jobs:
     name: Strict Termux Clang Compile
     needs: changes
     if: ${{ needs.changes.outputs.termux_compile == 'true' }}
-    uses: wallentx/gh-actions/.github/workflows/termux-run.yml@main
+    uses: ./.github/workflows/termux-run.yml
     with:
       packages: |
         clang
@@ -163,7 +156,7 @@ jobs:
     name: Termux Build and Package
     needs: changes
     if: ${{ needs.changes.outputs.build_package == 'true' }}
-    uses: wallentx/gh-actions/.github/workflows/termux-run.yml@main
+    uses: ./.github/workflows/termux-run.yml
     with:
       packages: |
         ca-certificates
@@ -211,7 +204,7 @@ jobs:
     name: Termux Installer Smoke Test
     needs: changes
     if: ${{ needs.changes.outputs.installer_smoke == 'true' }}
-    uses: wallentx/gh-actions/.github/workflows/termux-run.yml@main
+    uses: ./.github/workflows/termux-run.yml
     with:
       packages: |
         ca-certificates

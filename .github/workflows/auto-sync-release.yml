@@ -44,13 +44,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 🧰 Actions Toolbox
-        uses: wallentx/gh-actions/composite/actions-toolbox@main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          checkout: false
-
       - name: Check for New Version
         id: check_version
         env:
@@ -96,7 +89,7 @@ jobs:
     permissions:
       actions: read
       contents: read
-    uses: wallentx/gh-actions/.github/workflows/termux-run.yml@main
+    uses: ./.github/workflows/termux-run.yml
     with:
       packages: |
         ca-certificates
@@ -154,7 +147,7 @@ jobs:
     permissions:
       actions: read
       contents: read
-    uses: wallentx/gh-actions/.github/workflows/termux-run.yml@main
+    uses: ./.github/workflows/termux-run.yml
     with:
       packages: |
         ca-certificates
@@ -231,13 +224,6 @@ jobs:
         with:
           ref: dev
           fetch-depth: 0
-
-      - name: 🧰 Actions Toolbox
-        uses: wallentx/gh-actions/composite/actions-toolbox@main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          checkout: false
 
       - name: Download Standalone Archive
         uses: actions/download-artifact@v8

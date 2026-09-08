@@ -25,15 +25,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 🧰 Actions Toolbox
-        uses: wallentx/gh-actions/composite/actions-toolbox@main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          checkout: false
-          include-packages: |
-            shellcheck
-
       - name: Decide Whether To Run
         id: changed
         run: .github/scripts/ci-should-run.py shellcheck

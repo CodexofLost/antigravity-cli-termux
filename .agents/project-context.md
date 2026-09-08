@@ -1,9 +1,8 @@
 # Project Context: antigravity-cli-termux
 
 ## Overview
-- **Repository:** `CodexofLost/antigravity-cli-termux` (Forked from `wallentx/antigravity-cli-termux`)
-- **Upstream Port:** `wallentx/antigravity-cli-termux` (`dev` branch)
-- **Root Upstream:** Google Antigravity CLI (`google-antigravity/antigravity-cli` / manifest pipeline)
+- **Repository:** `CodexofLost/antigravity-cli-termux` (Standalone Root Repository)
+- **Upstream Engine:** Google Antigravity CLI (official manifest pipeline)
 - **Target Environment:** Native Android Termux (`linux-aarch64`)
 - **Core Goal:** Provide a relocatable, wrapper-free, glibc-compatible standalone port of the Google Antigravity CLI for Termux on Android devices.
 
@@ -11,10 +10,9 @@
 - **Direct Google Manifest Tracking:**
   - Google distributes new binary releases via an authenticated Cloud Run JSON manifest (`linux_arm64.json`).
   - `.github/scripts/check-version.sh` detects new upstream versions directly from Google's manifest and triggers automated build and release publishing on GitHub Actions.
-- **Autonomous Build Pipeline:**
-  - `.github/workflows/auto-sync-release.yml` builds directly from `CodexofLost/dev` without auto-merging `wallentx/dev`. This protects our deeply hardened native C bootstrapper and Termux supervisor from upstream merge conflicts.
-- **Optional Upstream Port Reference:**
-  - `wallentx/antigravity-cli-termux` can be manually inspected or cherry-picked as needed, but does not block or conflict with automated releases.
+- **Autonomous Inlined Build Pipeline:**
+  - `.github/workflows/auto-sync-release.yml` builds directly from `CodexofLost/dev` with fully inlined containerized Termux testing (`termux-run.yml`).
+  - 100% self-contained: zero external repository dependencies.
 
 ## Architecture & Components
 
