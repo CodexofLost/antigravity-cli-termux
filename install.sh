@@ -311,8 +311,9 @@ ensure_dependencies() {
     printf "127.0.0.1 localhost\n::1 localhost ip6-localhost\n" > "$hosts_file" 2>/dev/null || true
   fi
 
-  # Ensure Termux tmp directory exists
+  # Ensure Termux tmp directory exists with secure 0700 permissions
   mkdir -p "${TERMUX_PREFIX}/tmp" 2>/dev/null || true
+  chmod 0700 "${TERMUX_PREFIX}/tmp" 2>/dev/null || true
 }
 
 ensure_dependencies
@@ -373,6 +374,22 @@ install -m 0755 "$EXTRACT_DIR/agy" "$INSTALL_BIN_DIR/agy" || die "Failed to inst
 install -m 0755 "$EXTRACT_DIR/agy.va39" "$INSTALL_BIN_DIR/agy.va39" || die "Failed to install agy.va39 binary to $INSTALL_BIN_DIR"
 rm -rf "$EXTRACT_DIR"
 
+# ── Install Agent API CLI Bridge & Self-Heal Shim ───────────────────────────
+cat << EOF > "$INSTALL_BIN_DIR/agentapi"
+#!${TERMUX_PREFIX}/bin/sh
+exec "${INSTALL_BIN_DIR}/agy" agentapi "\$@"
+EOF
+chmod 0755 "$INSTALL_BIN_DIR/agentapi" || true
+
+_home_shim="${HOME}/.gemini/antigravity-cli/bin/agentapi"
+if [[ -f "$_home_shim" ]] && grep -q "ld-linux" "$_home_shim" 2>/dev/null; then
+  cat << EOF > "$_home_shim"
+#!${TERMUX_PREFIX}/bin/sh
+exec "${INSTALL_BIN_DIR}/agy" agentapi "\$@"
+EOF
+  chmod 0755 "$_home_shim" || true
+fi
+
 # ── Verify twin-binary ────────────────────────────────────────────────────────
 if [[ ! -f "$INSTALL_BIN_DIR/agy" || ! -f "$INSTALL_BIN_DIR/agy.va39" ]]; then
   rm -f "$INSTALL_BIN_DIR/agy" "$INSTALL_BIN_DIR/agy.va39"
@@ -417,6 +434,9 @@ esac
 info "Launching Antigravity CLI..."
 
 export PATH="$INSTALL_BIN_DIR:$PATH"
+export TMPDIR="${TERMUX_PREFIX}/tmp"
+export XDG_RUNTIME_DIR="${TERMUX_PREFIX}/tmp"
+export ANTIGRAVITY_AGENTAPI_EXE="${INSTALL_BIN_DIR}/agy"
 INSTALL_SUCCESS=1
 cleanup
 trap - EXIT

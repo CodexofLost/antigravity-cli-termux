@@ -413,13 +413,14 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
     int written = snprintf(
         update_cmd, sizeof(update_cmd),
         "install_dir=\"%s\"; release_tag=\"%s\"; "
-        "tmp=$(mktemp -d \"${TMPDIR:-$install_dir/../tmp}/agy-update.XXXXXX\") "
-        "|| exit 1; "
+        "staging_base=\"$install_dir/../tmp\"; "
+        "[ -d \"$staging_base\" ] || "
+        "staging_base=\"${TMPDIR:-/data/data/com.termux/files/usr/tmp}\"; "
+        "tmp=$(mktemp -d \"$staging_base/agy-update.XXXXXX\") || exit 1; "
         "new_agy=\"$install_dir/.agy.new.$$\"; "
         "new_payload=\"$install_dir/.agy.va39.new.$$\"; "
         "old_agy=\"$install_dir/.agy.old.$$\"; "
-        "old_payload=\"$install_dir/.agy.va39.old.$$\"; "
-        "old_agy_part=\"$old_agy.part\"; old_payload_part=\"$old_payload.part\"; committed=0; "
+        "old_payload=\"$install_dir/.agy.va39.old.$$\"; committed=0; "
         "cleanup() { status=$?; trap - EXIT HUP INT TERM; rollback_failed=0; "
         "if [ \"$committed\" -eq 0 ]; then "
         "[ ! -e \"$old_agy\" ] || mv -f \"$old_agy\" \"$install_dir/agy\" || "
@@ -427,11 +428,13 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "[ ! -e \"$old_payload\" ] || "
         "mv -f \"$old_payload\" \"$install_dir/agy.va39\" || rollback_failed=1; "
         "fi; "
-        "rm -f \"$new_agy\" \"$new_payload\" \"$old_agy_part\" \"$old_payload_part\"; "
+        "rm -f \"$new_agy\" \"$new_payload\"; "
         "rm -rf \"$tmp\"; "
         "if [ \"$rollback_failed\" -ne 0 ]; then exit 125; fi; exit \"$status\"; }; "
         "trap cleanup EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; "
-        "curl -fsSL -o \"$tmp/antigravity-termux-standalone.tar.gz\" "
+        "curl --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 300 --retry 3 "
+        "--retry-delay 2 "
+        "-fLsL -o \"$tmp/antigravity-termux-standalone.tar.gz\" "
         "\"https://github.com/%s/releases/download/"
         "$release_tag/antigravity-termux-standalone.tar.gz\" && "
         "tar -xzf \"$tmp/antigravity-termux-standalone.tar.gz\" -C \"$tmp\" "
@@ -441,10 +444,8 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "\"$tmp/agy\" --help >/dev/null 2>&1 && "
         "install -m 0755 \"$tmp/agy\" \"$new_agy\" && "
         "install -m 0755 \"$tmp/agy.va39\" \"$new_payload\" && "
-        "cp -p \"$install_dir/agy\" \"$old_agy_part\" && "
-        "mv -f \"$old_agy_part\" \"$old_agy\" && "
-        "cp -p \"$install_dir/agy.va39\" \"$old_payload_part\" && "
-        "mv -f \"$old_payload_part\" \"$old_payload\" && "
+        "mv -f \"$install_dir/agy\" \"$old_agy\" && "
+        "mv -f \"$install_dir/agy.va39\" \"$old_payload\" && "
         "mv -f \"$new_payload\" \"$install_dir/agy.va39\" && "
         "mv -f \"$new_agy\" \"$install_dir/agy\" && "
         "committed=1 && { rm -f \"$old_agy\" \"$old_payload\" || :; }",
@@ -459,14 +460,13 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
 }
 
 // Query this fork's latest release and update the installed twin binaries in place.
-static void check_and_perform_update(enum update_check_mode mode, const char *dir,
-                                     int auto_update) {
+static int check_and_perform_update(enum update_check_mode mode, const char *dir, int auto_update) {
     char latest_tag[64] = {0};
     if (mode == UPDATE_CHECK_EXPLICIT) {
         printf("[agy-termux] Querying latest release from %s...\n", get_agy_repo());
     }
     if (!fetch_latest_release_tag(mode, latest_tag, sizeof(latest_tag))) {
-        return;
+        return 0;
     }
 
     const char *clean_latest = (latest_tag[0] == 'v') ? latest_tag + 1 : latest_tag;
@@ -481,7 +481,7 @@ static void check_and_perform_update(enum update_check_mode mode, const char *di
 
     if (version_comparison == -2) {
         report_update_check_error(mode, "could not compare installed and available versions");
-        return;
+        return 0;
     }
     if (version_comparison <= 0) {
         if (mode == UPDATE_CHECK_EXPLICIT) {
@@ -494,13 +494,13 @@ static void check_and_perform_update(enum update_check_mode mode, const char *di
                        clean_current, clean_latest);
             }
         }
-        return;
+        return 0;
     }
 
     printf("\n[agy-termux] A new update (v%s) is available!\n", clean_latest);
     if (!should_perform_update(auto_update)) {
         printf("[agy-termux] Update cancelled.\n");
-        return;
+        return 0;
     }
 
     printf("\n[agy-termux] Downloading and applying standalone update...\n");
@@ -511,7 +511,7 @@ static void check_and_perform_update(enum update_check_mode mode, const char *di
         } else {
             printf("[agy-termux] Update completed successfully! Please restart the CLI.\n");
         }
-        return;
+        return 1;
     }
 
     if (status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 125) {
@@ -520,6 +520,7 @@ static void check_and_perform_update(enum update_check_mode mode, const char *di
         printf("[agy-termux] Error: Update failed; installed binaries were left unchanged or "
                "restored.\n");
     }
+    return 0;
 }
 
 static int is_update_help_flag(const char *arg) {
@@ -561,7 +562,7 @@ static int handle_update_command(const char *dir, int argc, char **argv) {
         }
     }
 
-    check_and_perform_update(UPDATE_CHECK_EXPLICIT, dir, auto_update);
+    (void)check_and_perform_update(UPDATE_CHECK_EXPLICIT, dir, auto_update);
     return 0;
 }
 
@@ -580,10 +581,11 @@ static int should_check_for_update_on_startup(int argc, char *const *argv) {
     return 1;
 }
 
-static void perform_startup_update_check(const char *dir, int argc, char **argv) {
+static int perform_startup_update_check(const char *dir, int argc, char **argv) {
     if (should_check_for_update_on_startup(argc, argv)) {
-        check_and_perform_update(UPDATE_CHECK_STARTUP, dir, env_requests_auto_update());
+        return check_and_perform_update(UPDATE_CHECK_STARTUP, dir, env_requests_auto_update());
     }
+    return 0;
 }
 
 static int is_native_termux(void) {
@@ -672,9 +674,89 @@ static int ensure_hosts_config(const char *prefix) {
     return 0;
 }
 
+static void self_heal_agentapi_shim(const char *prefix) {
+    const char *home = getenv("HOME");
+    char bin_dir[PATH_MAX];
+    char shim_path[PATH_MAX];
+    char buffer[256];
+    FILE *fp = NULL;
+    int needs_repair = 0;
+
+    if (home == NULL || home[0] == '\0') {
+        return;
+    }
+
+    if (snprintf(bin_dir, sizeof(bin_dir), "%s/.gemini/antigravity-cli/bin", home) >=
+            (int)sizeof(bin_dir) ||
+        access(bin_dir, F_OK) != 0) {
+        return;
+    }
+
+    if (snprintf(shim_path, sizeof(shim_path), "%s/agentapi", bin_dir) >= (int)sizeof(shim_path)) {
+        return;
+    }
+
+    if (access(shim_path, F_OK) != 0) {
+        needs_repair = 1;
+    } else {
+        fp = fopen(shim_path, "r");
+        if (fp != NULL) {
+            size_t read_bytes = fread(buffer, 1, sizeof(buffer) - 1, fp);
+            buffer[read_bytes] = '\0';
+            (void)fclose(fp);
+            if (strstr(buffer, "ld-linux") != NULL) {
+                needs_repair = 1;
+            }
+        }
+    }
+
+    if (needs_repair) {
+        fp = fopen(shim_path, "w");
+        if (fp != NULL) {
+            (void)fprintf(fp,
+                          "#!/data/data/com.termux/files/usr/bin/sh\n"
+                          "exec \"%s/bin/agy\" agentapi \"$@\"\n",
+                          prefix);
+            (void)fclose(fp);
+            (void)chmod(shim_path, 0755);
+        }
+    }
+}
+
+static void ensure_installed_agentapi(const char *prefix) {
+    char target_path[PATH_MAX];
+    char bin_path[PATH_MAX];
+    FILE *fp = NULL;
+
+    if (snprintf(target_path, sizeof(target_path), "%s/bin/agentapi", prefix) >=
+        (int)sizeof(target_path)) {
+        return;
+    }
+    if (snprintf(bin_path, sizeof(bin_path), "%s/bin", prefix) >= (int)sizeof(bin_path)) {
+        return;
+    }
+
+    if (access(bin_path, F_OK) != 0) {
+        return;
+    }
+
+    if (access(target_path, X_OK) != 0) {
+        fp = fopen(target_path, "w");
+        if (fp != NULL) {
+            (void)fprintf(fp,
+                          "#!/data/data/com.termux/files/usr/bin/sh\n"
+                          "exec \"%s/bin/agy\" agentapi \"$@\"\n",
+                          prefix);
+            (void)fclose(fp);
+            (void)chmod(target_path, 0755);
+        }
+    }
+}
+
 static void ensure_termux_shell_bridge(const char *prefix) {
     char dir_path[PATH_MAX];
     char script_path[PATH_MAX];
+    char env_script_path[PATH_MAX];
     char bionic_preload[PATH_MAX];
     char real_shell[PATH_MAX];
 
@@ -689,6 +771,7 @@ static void ensure_termux_shell_bridge(const char *prefix) {
     }
 
     (void)snprintf(script_path, sizeof(script_path), "%s/termux-shell", dir_path);
+    (void)snprintf(env_script_path, sizeof(env_script_path), "%s/termux-shell-env", dir_path);
 
     const char *current_shell = getenv("SHELL");
     if (current_shell == NULL || strstr(current_shell, "termux-shell") != NULL) {
@@ -707,14 +790,49 @@ static void ensure_termux_shell_bridge(const char *prefix) {
                       "#!/system/bin/sh\n"
                       "export LD_PRELOAD=\"%s\"\n"
                       "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
+                      "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
+                      "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
+                      "esac\n"
+                      "export TMPDIR=\"${TMPDIR:-%s/tmp}\"\n"
+                      "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-%s/tmp}\"\n"
                       "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
-                      bionic_preload, real_shell, real_shell);
+                      bionic_preload, real_shell, prefix, prefix, prefix, real_shell);
         (void)fclose(fp);
         (void)chmod(script_path, 0755);
     }
 
+    FILE *efp = fopen(env_script_path, "w");
+    if (efp != NULL) {
+        (void)fprintf(
+            efp,
+            "export LD_PRELOAD=\"%s\"\n"
+            "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
+            "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
+            "esac\n"
+            "export TMPDIR=\"${TMPDIR:-%s/tmp}\"\n"
+            "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-%s/tmp}\"\n"
+            "_agy_shim=\"${HOME:-/data/data/com.termux/files/home}/.gemini/antigravity-cli/bin/"
+            "agentapi\"\n"
+            "if [ -f \"$_agy_shim\" ] && grep -q \"ld-linux\" \"$_agy_shim\" 2>/dev/null; then\n"
+            "  printf '#!%s/bin/sh\\nexec \"%s/bin/agy\" agentapi \"$@\"\\n' > \"$_agy_shim\" "
+            "2>/dev/null || true\n"
+            "  chmod 0755 \"$_agy_shim\" 2>/dev/null || true\n"
+            "fi\n"
+            "agentapi() {\n"
+            "  exec \"%s/bin/agy\" agentapi \"$@\"\n"
+            "}\n"
+            "export -f agentapi 2>/dev/null || true\n",
+            bionic_preload, prefix, prefix, prefix, prefix, prefix, prefix);
+        (void)fclose(efp);
+        (void)chmod(env_script_path, 0644);
+    }
+
     if (access(script_path, X_OK) == 0) {
         setenv("SHELL", script_path, 1);
+    }
+    if (access(env_script_path, R_OK) == 0) {
+        setenv("BASH_ENV", env_script_path, 1);
+        setenv("ENV", env_script_path, 1);
     }
 }
 
@@ -740,7 +858,8 @@ static void setup_termux_environment(const char *prefix) {
         }
     }
 
-    // Ensure TMPDIR exists and points to Termux storage (Android /tmp is 0771 shell-only).
+    // Ensure TMPDIR and XDG_RUNTIME_DIR exist and point to Termux storage (Android /tmp is 0771
+    // shell-only).
     if (snprintf(path_buf, sizeof(path_buf), "%s/tmp", prefix) < (int)sizeof(path_buf)) {
         if (access(path_buf, F_OK) != 0) {
             (void)mkdir(path_buf, 0700);
@@ -749,6 +868,14 @@ static void setup_termux_environment(const char *prefix) {
         if (env_tmp == NULL || env_tmp[0] == '\0') {
             setenv("TMPDIR", path_buf, 1);
         }
+        if (getenv("XDG_RUNTIME_DIR") == NULL) {
+            setenv("XDG_RUNTIME_DIR", path_buf, 1);
+        }
+    }
+
+    // Explicitly set ANTIGRAVITY_AGENTAPI_EXE to agy wrapper path before launching the engine.
+    if (snprintf(path_buf, sizeof(path_buf), "%s/bin/agy", prefix) < (int)sizeof(path_buf)) {
+        setenv("ANTIGRAVITY_AGENTAPI_EXE", path_buf, 1);
     }
 
     // Allow git discovery across Android FUSE / sdcardfs mount boundaries.
@@ -768,6 +895,10 @@ static void setup_termux_environment(const char *prefix) {
 
     // Ensure localhost host mapping.
     (void)ensure_hosts_config(prefix);
+
+    // Ensure installed agentapi CLI shim and heal corrupted home shim.
+    ensure_installed_agentapi(prefix);
+    self_heal_agentapi_shim(prefix);
 
     // Bridge subshell execution so child scripts with Unix shebangs work properly.
     ensure_termux_shell_bridge(prefix);
@@ -874,7 +1005,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    perform_startup_update_check(dir, argc, argv);
+    if (perform_startup_update_check(dir, argc, argv) != 0) {
+        (void)execv(exec_path, argv);
+    }
 
     // Use only the Termux glibc runtime libraries.
     written = snprintf(lib_path, sizeof(lib_path), "%s/glibc/lib", prefix_path);
