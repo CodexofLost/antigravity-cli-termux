@@ -8,15 +8,13 @@
 - **Core Goal:** Provide a relocatable, wrapper-free, glibc-compatible standalone port of the Google Antigravity CLI for Termux on Android devices.
 
 ## Upstream Synchronization Architecture
-- **2-Tier Upstream Tracking:**
-  - `upstream` (`wallentx/antigravity-cli-termux`): Tracks ongoing Termux port patches, script fixes, and memory layout adjustments.
-  - `google` (`google-antigravity/antigravity-cli`): Official root repo.
-- **Unified Sync Stream:**
-  - Because `wallentx` merges Google's `main` into `wallentx/dev` every 6 hours, pulling from `wallentx/dev` automatically brings in both Google's official doc/repo updates and Wallentx's port features in one stream.
-  - `.github/workflows/auto-sync-release.yml` automatically syncs `origin/dev` against `wallentx/antigravity-cli-termux:dev`.
-- **Binary Releases:**
+- **Direct Google Manifest Tracking:**
   - Google distributes new binary releases via an authenticated Cloud Run JSON manifest (`linux_arm64.json`).
-  - `.github/scripts/check-version.sh` detects new upstream versions from this manifest and triggers automated build and release publishing on GitHub Actions.
+  - `.github/scripts/check-version.sh` detects new upstream versions directly from Google's manifest and triggers automated build and release publishing on GitHub Actions.
+- **Autonomous Build Pipeline:**
+  - `.github/workflows/auto-sync-release.yml` builds directly from `CodexofLost/dev` without auto-merging `wallentx/dev`. This protects our deeply hardened native C bootstrapper and Termux supervisor from upstream merge conflicts.
+- **Optional Upstream Port Reference:**
+  - `wallentx/antigravity-cli-termux` can be manually inspected or cherry-picked as needed, but does not block or conflict with automated releases.
 
 ## Architecture & Components
 
@@ -81,8 +79,8 @@
 - Installs twin binaries (`agy`, `agy.va39`) and `agentapi` CLI bridge to `$PREFIX/bin/`.
 
 ### 4. CI/CD & Automation (`.github/workflows/`)
-- `auto-sync-release.yml`: 6-hour cron check against Google Cloud Run release manifest and `wallentx/dev` upstream branch.
-- Syncs `dev` branch with `wallentx/antigravity-cli-termux:dev`.
+- `auto-sync-release.yml`: 6-hour cron check directly against Google Cloud Run release manifest (`linux_arm64.json`).
+- Autonomous pipeline builds directly from `CodexofLost/dev` without auto-merging upstream port.
 - Cross-compilation & automated building.
 - Containerized Termux smoke testing (`termux-run.yml`).
 - Attested GitHub Release creation via Sigstore.
