@@ -279,6 +279,13 @@ ensure_dependencies() {
     needed_pkgs+=("termux-exec-glibc")
   fi
 
+  local bionic_exec="${TERMUX_PREFIX}/lib/libtermux-exec.so"
+  if [[ ! -f "$bionic_exec" ]]; then
+    needed_pkgs+=("termux-exec")
+  fi
+
+  command -v termux-open-url >/dev/null 2>&1 || needed_pkgs+=("termux-tools")
+
   if ! check_lse && ! check_qemu; then
     needed_pkgs+=("qemu-user-aarch64")
   fi
@@ -296,6 +303,16 @@ ensure_dependencies() {
     mkdir -p "$(dirname "$resolv_conf")" 2>/dev/null || true
     printf "options timeout:2 attempts:2\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n" > "$resolv_conf" 2>/dev/null || true
   fi
+
+  # Proactive fallback for hosts if still unreadable
+  local hosts_file="${TERMUX_PREFIX}/etc/hosts"
+  if [[ ! -r "$hosts_file" ]]; then
+    mkdir -p "$(dirname "$hosts_file")" 2>/dev/null || true
+    printf "127.0.0.1 localhost\n::1 localhost ip6-localhost\n" > "$hosts_file" 2>/dev/null || true
+  fi
+
+  # Ensure Termux tmp directory exists
+  mkdir -p "${TERMUX_PREFIX}/tmp" 2>/dev/null || true
 }
 
 ensure_dependencies

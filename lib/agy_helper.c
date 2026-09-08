@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -648,6 +649,126 @@ static int require_resolver_config(const char *prefix) {
     return 0;
 }
 
+static int ensure_hosts_config(const char *prefix) {
+    char hosts_path[PATH_MAX];
+    int written = snprintf(hosts_path, sizeof(hosts_path), "%s/etc/hosts", prefix);
+    if (written < 0 || written >= (int)sizeof(hosts_path)) {
+        return 0;
+    }
+
+    if (access(hosts_path, R_OK) == 0) {
+        return 1;
+    }
+
+    FILE *fp = fopen(hosts_path, "w");
+    if (fp != NULL) {
+        (void)fputs("127.0.0.1 localhost\n"
+                    "::1 localhost ip6-localhost\n",
+                    fp);
+        (void)fclose(fp);
+        return access(hosts_path, R_OK) == 0;
+    }
+
+    return 0;
+}
+
+static void ensure_termux_shell_bridge(const char *prefix) {
+    char dir_path[PATH_MAX];
+    char script_path[PATH_MAX];
+    char bionic_preload[PATH_MAX];
+    char real_shell[PATH_MAX];
+
+    (void)snprintf(dir_path, sizeof(dir_path), "%s/libexec/agy", prefix);
+    if (access(dir_path, F_OK) != 0) {
+        (void)mkdir(dir_path, 0755);
+    }
+
+    (void)snprintf(bionic_preload, sizeof(bionic_preload), "%s/lib/libtermux-exec.so", prefix);
+    if (access(bionic_preload, R_OK) != 0) {
+        return;
+    }
+
+    (void)snprintf(script_path, sizeof(script_path), "%s/termux-shell", dir_path);
+
+    const char *current_shell = getenv("SHELL");
+    if (current_shell == NULL || strstr(current_shell, "termux-shell") != NULL) {
+        (void)snprintf(real_shell, sizeof(real_shell), "%s/bin/bash", prefix);
+        if (access(real_shell, X_OK) != 0) {
+            (void)snprintf(real_shell, sizeof(real_shell), "%s/bin/sh", prefix);
+        }
+    } else {
+        (void)snprintf(real_shell, sizeof(real_shell), "%s", current_shell);
+    }
+    setenv("AGY_REAL_SHELL", real_shell, 1);
+
+    FILE *fp = fopen(script_path, "w");
+    if (fp != NULL) {
+        (void)fprintf(fp, "#!/system/bin/sh\n"
+                          "export LD_PRELOAD=\"%s\"\n"
+                          "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
+                          "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
+                      bionic_preload, real_shell, real_shell);
+        (void)fclose(fp);
+        (void)chmod(script_path, 0755);
+    }
+
+    if (access(script_path, X_OK) == 0) {
+        setenv("SHELL", script_path, 1);
+    }
+}
+
+static void setup_termux_environment(const char *prefix) {
+    char path_buf[PATH_MAX];
+
+    // Ensure UTF-8 locale is configured for glibc.
+    if (getenv("LANG") == NULL) {
+        setenv("LANG", "en_US.UTF-8", 0);
+    }
+
+    // Set dynamic Go resolver.
+    setenv("GODEBUG", "netdns=cgo", 1);
+
+    // SSL certificates for Go / curl / OpenSSL.
+    if (snprintf(path_buf, sizeof(path_buf), "%s/etc/tls/cert.pem", prefix) < (int)sizeof(path_buf)) {
+        setenv("SSL_CERT_FILE", path_buf, 1);
+
+        // SSL certificates for Node.js / MCP servers.
+        if (getenv("NODE_EXTRA_CA_CERTS") == NULL && access(path_buf, R_OK) == 0) {
+            setenv("NODE_EXTRA_CA_CERTS", path_buf, 0);
+        }
+    }
+
+    // Ensure TMPDIR exists and points to Termux storage (Android /tmp is 0771 shell-only).
+    if (snprintf(path_buf, sizeof(path_buf), "%s/tmp", prefix) < (int)sizeof(path_buf)) {
+        if (access(path_buf, F_OK) != 0) {
+            (void)mkdir(path_buf, 0700);
+        }
+        if (getenv("TMPDIR") == NULL || getenv("TMPDIR")[0] == '\0') {
+            setenv("TMPDIR", path_buf, 1);
+        }
+    }
+
+    // Allow git discovery across Android FUSE / sdcardfs mount boundaries.
+    if (getenv("GIT_DISCOVERY_ACROSS_FILESYSTEM") == NULL) {
+        setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1", 0);
+    }
+
+    // Default browser handler for Termux OAuth authentication flows.
+    if (getenv("BROWSER") == NULL) {
+        if (snprintf(path_buf, sizeof(path_buf), "%s/bin/termux-open-url", prefix) < (int)sizeof(path_buf)) {
+            if (access(path_buf, X_OK) == 0) {
+                setenv("BROWSER", path_buf, 0);
+            }
+        }
+    }
+
+    // Ensure localhost host mapping.
+    (void)ensure_hosts_config(prefix);
+
+    // Bridge subshell execution so child scripts with Unix shebangs work properly.
+    ensure_termux_shell_bridge(prefix);
+}
+
 static int resolve_qemu_for_cpu(const char *prefix, char *qemu_path, size_t qemu_path_len,
                                 const char **qemu) {
     unsigned long hwcap = getauxval(AT_HWCAP);
@@ -673,7 +794,6 @@ int main(int argc, char **argv) {
     char lib_path[PATH_MAX + 16];
     char patched_bin[PATH_MAX];
     char dynamic_loader[PATH_MAX];
-    char cert_path[PATH_MAX];
     char prefix_path[PATH_MAX];
     char qemu_path[PATH_MAX];
     char preload_lib[PATH_MAX];
@@ -721,18 +841,8 @@ int main(int argc, char **argv) {
     unsetenv("LD_PRELOAD");
     unsetenv("LD_LIBRARY_PATH");
 
-    // Ensure UTF-8 locale is configured for glibc.
-    if (getenv("LANG") == NULL) {
-        setenv("LANG", "en_US.UTF-8", 0);
-    }
-
-    // Set dynamic Go resolver and SSL configuration.
-    setenv("GODEBUG", "netdns=cgo", 1);
-    written = snprintf(cert_path, sizeof(cert_path), "%s/etc/tls/cert.pem", prefix_path);
-    if (written < 0 || written >= (int)sizeof(cert_path)) {
-        return 1;
-    }
-    setenv("SSL_CERT_FILE", cert_path, 1);
+    // Configure Termux environment variables, certs, temp dir, git discovery, and shell bridge.
+    setup_termux_environment(prefix_path);
 
     read_len = readlink("/proc/self/exe", exec_path, sizeof(exec_path) - 1);
     if (read_len < 0 || read_len >= (ssize_t)sizeof(exec_path)) {

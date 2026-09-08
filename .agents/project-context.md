@@ -27,6 +27,8 @@
     - Bitmask & `ubfx` instructions (`42/44` -> `35/37`, `22/21` -> `29/28`).
     - Page-alignment constants and `mmap` masks.
     - Low-level syscall overrides (e.g. `faccessat2` -> `faccessat`).
+  - **Patch Safety Assertions:**
+    - Asserts all critical opcode replacement counts (`ubfx`, `lsl`, `mask`, `mmap`) are strictly greater than zero. Fails the build immediately if upstream binary layout changes to prevent packaging segfaulting binaries.
   - Output binary: `bin/agy.va39`.
 - Passes `-DAGY_GITHUB_REPO="CodexofLost/antigravity-cli-termux"` to clang when compiling the native bootstrapper.
 
@@ -37,8 +39,17 @@
   - Auto-detects glibc-native `libtermux-exec.so` (`$PREFIX/glibc/lib/libtermux-exec.so`) and passes `--preload` to `ld-linux`. This transparently intercepts `execve()` to redirect `/bin/sh`, `/bin/bash`, and `/usr/bin/env` without breaking, while cleanly stripping preloads when invoking Bionic binaries.
   - Sets `--argv0 agy` on the glibc dynamic linker so process name and CLI usage display cleanly as `agy`.
   - Sets `SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem` and `GODEBUG=netdns=cgo`.
+  - Configures `NODE_EXTRA_CA_CERTS=$PREFIX/etc/tls/cert.pem` for Node.js MCP server TLS verification.
+  - Ensures `TMPDIR=$PREFIX/tmp` exists with permissions `0700` (avoiding Android system `/tmp` 0771 permission denials).
+  - Sets `GIT_DISCOVERY_ACROSS_FILESYSTEM=1` to allow git discovery across Android shared storage (`/storage/emulated/0`) FUSE mount boundaries.
+  - Sets `BROWSER=termux-open-url` (if unset) for native Android browser launch in OAuth authentication.
   - Guarantees UTF-8 locale (`LANG=en_US.UTF-8` fallback).
   - Verifies presence of `$PREFIX/etc/resolv.conf`, automatically writing a fallback configuration with public nameservers (`1.1.1.1`, `8.8.8.8`) if missing.
+  - Verifies presence of `$PREFIX/etc/hosts`, automatically writing `localhost` and `ip6-localhost` mappings if missing.
+- **Subshell Shebang Execution Bridge:**
+  - Automatically manages `$PREFIX/libexec/agy/termux-shell` (executable `0755`).
+  - Sets `SHELL=$PREFIX/libexec/agy/termux-shell` and `AGY_REAL_SHELL` to the user's real shell (bash/zsh).
+  - When subshells or tools are executed by Go/glibc, `termux-shell` injects Bionic's `libtermux-exec.so` into `LD_PRELOAD`, enabling scripts with `#!/bin/bash` or `#!/usr/bin/env` to execute seamlessly without `bad interpreter` errors.
 - **Hardware Capability Detection:**
   - Checks ARMv8.1-A LSE atomics (`HWCAP_ATOMICS`) via `getauxval(AT_HWCAP)`.
   - Falls back to running engine under `$PREFIX/bin/qemu-aarch64` if LSE is unsupported.
@@ -48,8 +59,9 @@
 
 ### 3. Self-Healing Installer (`install.sh`)
 - Enforces native Termux validation (rejects PRoot).
-- `ensure_dependencies()` automatically checks and installs required Termux packages: `glibc`, `glibc-repo`, `resolv-conf`, `ca-certificates`, `termux-exec-glibc`, `qemu-user-aarch64` via `pkg`.
-- Auto-generates fallback `resolv.conf` if not present.
+- `ensure_dependencies()` automatically checks and installs required Termux packages: `glibc`, `glibc-repo`, `resolv-conf`, `ca-certificates`, `termux-exec-glibc`, `termux-exec`, `termux-tools`, `qemu-user-aarch64` via `pkg`.
+- Auto-generates fallback `resolv.conf` and `hosts` if not present.
+- Ensures `$PREFIX/tmp` exists.
 - Installs twin binaries (`agy`, `agy.va39`) to `$PREFIX/bin/`.
 
 ### 4. CI/CD & Automation (`.github/workflows/`)
