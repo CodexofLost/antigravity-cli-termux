@@ -64,7 +64,7 @@ jobs:
         if: steps.check_version.outputs.build_needed == 'true'
         run: |
           echo "Packaging standalone release archive..."
-          tar -czf antigravity-termux-standalone.tar.gz -C bin agy agy.va39
+          tar -czf antigravity-termux-standalone.tar.gz -C bin agy agy.va39 libtermux-stat-fix.so
 
       - name: Upload Standalone Archive to Run Artifacts
         if: steps.check_version.outputs.build_needed == 'true'
@@ -133,6 +133,7 @@ jobs:
 
         test -x "$PREFIX/bin/agy"
         test -x "$PREFIX/bin/agy.va39"
+        test -f "$PREFIX/lib/libtermux-stat-fix.so"
 
         version_output=$("$PREFIX/bin/agy" --version)
         printf 'agy version: %s\n' "$version_output"

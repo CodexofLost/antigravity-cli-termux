@@ -821,9 +821,9 @@ static void self_heal_agentapi_shim(const char *prefix) {
         fp = fopen(shim_path, "w");
         if (fp != NULL) {
             (void)fprintf(fp,
-                          "#!/data/data/com.termux/files/usr/bin/sh\n"
+                          "#!%s/bin/sh\n"
                           "exec \"%s/bin/agy\" agentapi \"$@\"\n",
-                          prefix);
+                          prefix, prefix);
             (void)fclose(fp);
             (void)chmod(shim_path, 0755);
         }
@@ -851,9 +851,9 @@ static void ensure_installed_agentapi(const char *prefix) {
         fp = fopen(target_path, "w");
         if (fp != NULL) {
             (void)fprintf(fp,
-                          "#!/data/data/com.termux/files/usr/bin/sh\n"
+                          "#!%s/bin/sh\n"
                           "exec \"%s/bin/agy\" agentapi \"$@\"\n",
-                          prefix);
+                          prefix, prefix);
             (void)fclose(fp);
             (void)chmod(target_path, 0755);
         }
@@ -861,7 +861,7 @@ static void ensure_installed_agentapi(const char *prefix) {
 }
 
 static void wrap_grte_binary_if_needed(const char *binary_path, const char *prefix) {
-    char header[4] = {0};
+    char header[4096] = {0};
     FILE *fp = fopen(binary_path, "rb");
     if (fp == NULL) {
         return;
@@ -875,8 +875,17 @@ static void wrap_grte_binary_if_needed(const char *binary_path, const char *pref
         return;
     }
 
+    // Verify it is a glibc/GRTE dynamic binary before wrapping
+    if (memmem(header, read_bytes, "ld-linux", 8) == NULL &&
+        memmem(header, read_bytes, "grte", 4) == NULL) {
+        return;
+    }
+
     char real_path[PATH_MAX];
-    if (snprintf(real_path, sizeof(real_path), "%s.real", binary_path) >= (int)sizeof(real_path)) {
+    char tmp_path[PATH_MAX];
+    if (snprintf(real_path, sizeof(real_path), "%s.real", binary_path) >= (int)sizeof(real_path) ||
+        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", binary_path, (int)getpid()) >=
+            (int)sizeof(tmp_path)) {
         return;
     }
 
@@ -885,22 +894,29 @@ static void wrap_grte_binary_if_needed(const char *binary_path, const char *pref
         return;
     }
 
-    // Write launcher script invoking Termux glibc loader with cleared Bionic preloads
-    fp = fopen(binary_path, "w");
+    // Write launcher script atomically invoking Termux glibc loader with cleared Bionic preloads
+    fp = fopen(tmp_path, "w");
     if (fp == NULL) {
         (void)rename(real_path, binary_path);
         return;
     }
 
     (void)fprintf(fp,
-                  "#!/data/data/com.termux/files/usr/bin/sh\n"
+                  "#!%s/bin/sh\n"
                   "unset LD_PRELOAD\n"
                   "unset LD_LIBRARY_PATH\n"
+                  "_target=\"$0.real\"\n"
+                  "[ -f \"$_target\" ] || _target=\"$(dirname \"$0\")/$(basename \"$0\").real\"\n"
                   "exec \"%s/glibc/lib/ld-linux-aarch64.so.1\" --library-path \"%s/glibc/lib\" "
-                  "\"$0.real\" \"$@\"\n",
-                  prefix, prefix);
+                  "\"$_target\" \"$@\"\n",
+                  prefix, prefix, prefix);
     (void)fclose(fp);
-    (void)chmod(binary_path, 0755);
+    (void)chmod(tmp_path, 0755);
+
+    if (rename(tmp_path, binary_path) != 0) {
+        (void)unlink(tmp_path);
+        (void)rename(real_path, binary_path);
+    }
 }
 
 static void self_heal_auxiliary_binaries(const char *prefix) {
@@ -909,44 +925,12 @@ static void self_heal_auxiliary_binaries(const char *prefix) {
         home = "/data/data/com.termux/files/home";
     }
 
-    // 1. Self-heal webm_encoder in ~/.gemini/antigravity-cli/bin/
+    // Self-heal webm_encoder in ~/.gemini/antigravity-cli/bin/
     char webm_path[PATH_MAX];
     if (snprintf(webm_path, sizeof(webm_path), "%s/.gemini/antigravity-cli/bin/webm_encoder",
                  home) < (int)sizeof(webm_path)) {
         wrap_grte_binary_if_needed(webm_path, prefix);
     }
-
-    // 2. Self-heal embedded ripgrep binaries in ~/.cache/antigravity/bin/
-    const char *cache_home = getenv("XDG_CACHE_HOME");
-    char cache_bin_dir[PATH_MAX];
-    if (cache_home != NULL && cache_home[0] != '\0') {
-        (void)snprintf(cache_bin_dir, sizeof(cache_bin_dir), "%s/antigravity/bin", cache_home);
-    } else {
-        (void)snprintf(cache_bin_dir, sizeof(cache_bin_dir), "%s/.cache/antigravity/bin", home);
-    }
-
-    DIR *dir = opendir(cache_bin_dir);
-    if (dir == NULL) {
-        return;
-    }
-
-    struct dirent *entry = NULL;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strncmp(entry->d_name, "rg_embedded", 11) != 0) {
-            continue;
-        }
-        size_t name_len = strlen(entry->d_name);
-        if (name_len > 5 && strcmp(entry->d_name + name_len - 5, ".real") == 0) {
-            continue;
-        }
-
-        char rg_path[PATH_MAX];
-        if (snprintf(rg_path, sizeof(rg_path), "%s/%s", cache_bin_dir, entry->d_name) <
-            (int)sizeof(rg_path)) {
-            wrap_grte_binary_if_needed(rg_path, prefix);
-        }
-    }
-    (void)closedir(dir);
 }
 
 static void ensure_termux_shell_bridge(const char *prefix) {
@@ -964,6 +948,13 @@ static void ensure_termux_shell_bridge(const char *prefix) {
     (void)snprintf(bionic_preload, sizeof(bionic_preload), "%s/lib/libtermux-exec.so", prefix);
     if (access(bionic_preload, R_OK) != 0) {
         return;
+    }
+
+    char stat_fix_path[PATH_MAX];
+    (void)snprintf(stat_fix_path, sizeof(stat_fix_path), "%s/lib/libtermux-stat-fix.so", prefix);
+    if (access(stat_fix_path, R_OK) == 0) {
+        (void)snprintf(bionic_preload, sizeof(bionic_preload), "%s/lib/libtermux-exec.so:%s",
+                       prefix, stat_fix_path);
     }
 
     (void)snprintf(script_path, sizeof(script_path), "%s/termux-shell", dir_path);

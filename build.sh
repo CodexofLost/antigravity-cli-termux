@@ -244,6 +244,13 @@ fi
 chmod +x bin/agy
 ok "Native Termux bootstrapper compiled successfully."
 
+# Compile the native Termux stat fix preload library.
+info "Compiling native Termux stat fix preload library..."
+if ! "$local_cc" -O2 -fPIC -shared -o bin/libtermux-stat-fix.so lib/termux_stat_fix.c -ldl; then
+  die "Compilation of lib/termux_stat_fix.c failed."
+fi
+ok "Native Termux stat fix preload library compiled successfully: bin/libtermux-stat-fix.so"
+
 if [[ -n "${TERMUX_VERSION:-}" ]]; then
   info "Validating built Termux binary with --help..."
   if ! bin/agy --help >/dev/null; then

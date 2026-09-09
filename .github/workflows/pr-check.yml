@@ -185,7 +185,7 @@ jobs:
         ./build.sh
 
         echo "Packaging standalone release archive..."
-        tar -czf antigravity-termux-standalone.tar.gz -C bin agy agy.va39
+        tar -czf antigravity-termux-standalone.tar.gz -C bin agy agy.va39 libtermux-stat-fix.so
 
         if [[ ! -f antigravity-termux-standalone.tar.gz ]]; then
           echo "Error: Release archive antigravity-termux-standalone.tar.gz was not generated." >&2
@@ -197,6 +197,7 @@ jobs:
 
         tar -tzf antigravity-termux-standalone.tar.gz | grep -qE '^agy$' || (echo "Error: Missing agy in release archive!" && exit 1)
         tar -tzf antigravity-termux-standalone.tar.gz | grep -qE '^agy\.va39$' || (echo "Error: Missing agy.va39 in release archive!" && exit 1)
+        tar -tzf antigravity-termux-standalone.tar.gz | grep -qE '^libtermux-stat-fix\.so$' || (echo "Error: Missing libtermux-stat-fix.so in release archive!" && exit 1)
 
         echo "Archive validation passed successfully."
 
@@ -247,8 +248,9 @@ jobs:
         FIXTURE
         chmod 0755 "$payload/agy"
         cp "$payload/agy" "$payload/agy.va39"
+        touch "$payload/libtermux-stat-fix.so"
 
-        tar -czf "$archive" -C "$payload" agy agy.va39
+        tar -czf "$archive" -C "$payload" agy agy.va39 libtermux-stat-fix.so
 
         AGY_INSTALL_URL="file://$archive" \
         AGY_INSTALL_SKIP_LAUNCH=1 \
@@ -256,5 +258,6 @@ jobs:
 
         test -x "$PREFIX/bin/agy"
         test -x "$PREFIX/bin/agy.va39"
+        test -f "$PREFIX/lib/libtermux-stat-fix.so"
         "$PREFIX/bin/agy" --version | grep -qx "v0.0.0-ci"
         "$PREFIX/bin/agy" --help | grep -q "agy fixture help"

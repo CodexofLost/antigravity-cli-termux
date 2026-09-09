@@ -38,7 +38,8 @@
   - Configures `NODE_EXTRA_CA_CERTS=$PREFIX/etc/tls/cert.pem` for Node.js MCP server TLS verification.
   - Ensures `TMPDIR=$PREFIX/tmp` and `XDG_RUNTIME_DIR=$PREFIX/tmp` exist with permissions `0700` (avoiding Android system `/tmp` 0771 permission denials, FUSE socket bind failures, and 108-byte sockaddr_un path overflows).
   - Explicitly injects `ANTIGRAVITY_AGENTAPI_EXE=$PREFIX/bin/agy` to prevent Go's `/proc/self/exe` resolution from defaulting to `ld-linux-aarch64.so.1`.
-  - Automatically installs and maintains `$PREFIX/bin/agentapi`, self-heals corrupted `~/.gemini/antigravity-cli/bin/agentapi` shims, and automatically bridges upstream auxiliary GRTE binaries (embedded `ripgrep` in `~/.cache/antigravity/bin/rg_embedded-*` and `webm_encoder` in `~/.gemini/antigravity-cli/bin/webm_encoder`) via glibc dynamic loader wrappers, preventing `cannot execute: required file not found` crashes.
+  - Automatically installs and maintains `$PREFIX/bin/agentapi`, self-heals corrupted `~/.gemini/antigravity-cli/bin/agentapi` shims, atomically wraps standalone auxiliary GRTE binaries (`webm_encoder` in `~/.gemini/antigravity-cli/bin/webm_encoder`) via glibc dynamic loader wrappers, and relies on native Termux `ripgrep` (`$PREFIX/bin/rg`) via `$PATH` for NEON-accelerated Bionic code search.
+  - Automatically builds, installs, and injects `libtermux-stat-fix.so` into `termux-shell` and `termux-shell-env`, intercepting `fstatat`/`stat` for `/storage/emulated` to completely eliminate Git 2.35+ `fatal: detected dubious ownership` failures across Android shared storage (`/storage/emulated/0`).
   - Sets `GIT_DISCOVERY_ACROSS_FILESYSTEM=1` to allow git discovery across Android shared storage (`/storage/emulated/0`) FUSE mount boundaries.
   - Sets `BROWSER=termux-open-url` (if unset) for native Android browser launch in OAuth authentication.
   - Guarantees UTF-8 locale (`LANG=en_US.UTF-8` fallback).
@@ -56,7 +57,7 @@
 - **Subshell Shebang Execution Bridge & Non-Interactive Environment:**
   - Automatically manages `$PREFIX/libexec/agy/termux-shell` (executable `0755`) and `$PREFIX/libexec/agy/termux-shell-env`.
   - Sets `SHELL=$PREFIX/libexec/agy/termux-shell`, `BASH_ENV=$PREFIX/libexec/agy/termux-shell-env`, `ENV=$PREFIX/libexec/agy/termux-shell-env`, and `AGY_REAL_SHELL` to the user's real shell (bash/zsh).
-  - Ensures all child shells (interactive and non-interactive `bash -c` / `sh -c`), subagents, and MCP background processes inherit Bionic's `libtermux-exec.so`, `ANTIGRAVITY_AGENTAPI_EXE`, `TMPDIR`, and `XDG_RUNTIME_DIR`, preventing `bad interpreter: No such file or directory` errors on scripts with `#!/bin/bash` or `#!/usr/bin/env`.
+  - Ensures all child shells (interactive and non-interactive `bash -c` / `sh -c`), subagents, and MCP background processes inherit Bionic's `libtermux-exec.so` and `libtermux-stat-fix.so`, `ANTIGRAVITY_AGENTAPI_EXE`, `TMPDIR`, and `XDG_RUNTIME_DIR`, preventing `bad interpreter` errors on shebangs and ensuring seamless Git execution across shared storage.
 - **Hardware Capability Detection:**
   - Checks ARMv8.1-A LSE atomics (`HWCAP_ATOMICS`) via `getauxval(AT_HWCAP)`.
   - Falls back to running engine under `$PREFIX/bin/qemu-aarch64` if LSE is unsupported.
