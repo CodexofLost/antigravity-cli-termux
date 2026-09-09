@@ -379,7 +379,7 @@ install -m 0755 "$EXTRACT_DIR/agy" "$INSTALL_BIN_DIR/agy" || die "Failed to inst
 install -m 0755 "$EXTRACT_DIR/agy.va39" "$INSTALL_BIN_DIR/agy.va39" || die "Failed to install agy.va39 binary to $INSTALL_BIN_DIR"
 if [[ -f "$EXTRACT_DIR/libtermux-stat-fix.so" ]]; then
   mkdir -p "${TERMUX_PREFIX}/lib" 2>/dev/null || true
-  cp -f "$EXTRACT_DIR/libtermux-stat-fix.so" "${TERMUX_PREFIX}/lib/libtermux-stat-fix.so" || true
+  install -m 0755 "$EXTRACT_DIR/libtermux-stat-fix.so" "${TERMUX_PREFIX}/lib/libtermux-stat-fix.so" || true
 fi
 rm -rf "$EXTRACT_DIR"
 
@@ -440,12 +440,6 @@ EOF
 esac
 
 # ── Launch ────────────────────────────────────────────────────────────────────
-info "Launching Antigravity CLI..."
-
-export PATH="$INSTALL_BIN_DIR:$PATH"
-export TMPDIR="${TERMUX_PREFIX}/tmp"
-export XDG_RUNTIME_DIR="${TERMUX_PREFIX}/tmp"
-export ANTIGRAVITY_AGENTAPI_EXE="${INSTALL_BIN_DIR}/agy"
 INSTALL_SUCCESS=1
 cleanup
 trap - EXIT
@@ -455,4 +449,17 @@ if [[ "${AGY_INSTALL_SKIP_LAUNCH:-0}" == "1" ]]; then
   exit 0
 fi
 
+if [[ ! -t 0 ]]; then
+  printf '\n%b\n' "${GREEN}${BOLD}Run '${CYAN}agy${GREEN}' to get started!${RESET}\n"
+  exit 0
+fi
+
+info "Launching Antigravity CLI..."
+
+export PATH="$INSTALL_BIN_DIR:$PATH"
+export TMPDIR="${TERMUX_PREFIX}/tmp"
+export XDG_RUNTIME_DIR="${TERMUX_PREFIX}/tmp"
+export ANTIGRAVITY_AGENTAPI_EXE="${INSTALL_BIN_DIR}/agy"
+
 exec "$INSTALL_BIN_DIR/agy"
+
