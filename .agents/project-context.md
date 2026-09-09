@@ -38,7 +38,7 @@
   - Configures `NODE_EXTRA_CA_CERTS=$PREFIX/etc/tls/cert.pem` for Node.js MCP server TLS verification.
   - Ensures `TMPDIR=$PREFIX/tmp` and `XDG_RUNTIME_DIR=$PREFIX/tmp` exist with permissions `0700` (avoiding Android system `/tmp` 0771 permission denials, FUSE socket bind failures, and 108-byte sockaddr_un path overflows).
   - Explicitly injects `ANTIGRAVITY_AGENTAPI_EXE=$PREFIX/bin/agy` to prevent Go's `/proc/self/exe` resolution from defaulting to `ld-linux-aarch64.so.1`.
-  - Automatically installs and maintains `$PREFIX/bin/agentapi` and self-heals corrupted `~/.gemini/antigravity-cli/bin/agentapi` shims.
+  - Automatically installs and maintains `$PREFIX/bin/agentapi`, self-heals corrupted `~/.gemini/antigravity-cli/bin/agentapi` shims, and automatically bridges upstream auxiliary GRTE binaries (embedded `ripgrep` in `~/.cache/antigravity/bin/rg_embedded-*` and `webm_encoder` in `~/.gemini/antigravity-cli/bin/webm_encoder`) via glibc dynamic loader wrappers, preventing `cannot execute: required file not found` crashes.
   - Sets `GIT_DISCOVERY_ACROSS_FILESYSTEM=1` to allow git discovery across Android shared storage (`/storage/emulated/0`) FUSE mount boundaries.
   - Sets `BROWSER=termux-open-url` (if unset) for native Android browser launch in OAuth authentication.
   - Guarantees UTF-8 locale (`LANG=en_US.UTF-8` fallback).

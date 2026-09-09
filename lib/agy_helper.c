@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <asm/hwcap.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <libgen.h>
 #include <limits.h>
@@ -27,7 +28,7 @@
 #endif
 
 #ifndef AGY_TERMUX_VERSION
-#define AGY_TERMUX_VERSION "1.0.2"
+#define AGY_TERMUX_VERSION "1.1.28"
 #endif
 
 #ifndef AGY_GITHUB_REPO
@@ -859,6 +860,95 @@ static void ensure_installed_agentapi(const char *prefix) {
     }
 }
 
+static void wrap_grte_binary_if_needed(const char *binary_path, const char *prefix) {
+    char header[4] = {0};
+    FILE *fp = fopen(binary_path, "rb");
+    if (fp == NULL) {
+        return;
+    }
+    size_t read_bytes = fread(header, 1, sizeof(header), fp);
+    (void)fclose(fp);
+
+    // Only wrap unpatched raw ELF binaries (\x7fELF)
+    if (read_bytes < 4 || header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' ||
+        header[3] != 'F') {
+        return;
+    }
+
+    char real_path[PATH_MAX];
+    if (snprintf(real_path, sizeof(real_path), "%s.real", binary_path) >= (int)sizeof(real_path)) {
+        return;
+    }
+
+    // Move raw ELF to <path>.real
+    if (rename(binary_path, real_path) != 0) {
+        return;
+    }
+
+    // Write launcher script invoking Termux glibc loader with cleared Bionic preloads
+    fp = fopen(binary_path, "w");
+    if (fp == NULL) {
+        (void)rename(real_path, binary_path);
+        return;
+    }
+
+    (void)fprintf(fp,
+                  "#!/data/data/com.termux/files/usr/bin/sh\n"
+                  "unset LD_PRELOAD\n"
+                  "unset LD_LIBRARY_PATH\n"
+                  "exec \"%s/glibc/lib/ld-linux-aarch64.so.1\" --library-path \"%s/glibc/lib\" "
+                  "\"$0.real\" \"$@\"\n",
+                  prefix, prefix);
+    (void)fclose(fp);
+    (void)chmod(binary_path, 0755);
+}
+
+static void self_heal_auxiliary_binaries(const char *prefix) {
+    const char *home = getenv("HOME");
+    if (home == NULL || home[0] == '\0') {
+        home = "/data/data/com.termux/files/home";
+    }
+
+    // 1. Self-heal webm_encoder in ~/.gemini/antigravity-cli/bin/
+    char webm_path[PATH_MAX];
+    if (snprintf(webm_path, sizeof(webm_path), "%s/.gemini/antigravity-cli/bin/webm_encoder",
+                 home) < (int)sizeof(webm_path)) {
+        wrap_grte_binary_if_needed(webm_path, prefix);
+    }
+
+    // 2. Self-heal embedded ripgrep binaries in ~/.cache/antigravity/bin/
+    const char *cache_home = getenv("XDG_CACHE_HOME");
+    char cache_bin_dir[PATH_MAX];
+    if (cache_home != NULL && cache_home[0] != '\0') {
+        (void)snprintf(cache_bin_dir, sizeof(cache_bin_dir), "%s/antigravity/bin", cache_home);
+    } else {
+        (void)snprintf(cache_bin_dir, sizeof(cache_bin_dir), "%s/.cache/antigravity/bin", home);
+    }
+
+    DIR *dir = opendir(cache_bin_dir);
+    if (dir == NULL) {
+        return;
+    }
+
+    struct dirent *entry = NULL;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "rg_embedded", 11) != 0) {
+            continue;
+        }
+        size_t name_len = strlen(entry->d_name);
+        if (name_len > 5 && strcmp(entry->d_name + name_len - 5, ".real") == 0) {
+            continue;
+        }
+
+        char rg_path[PATH_MAX];
+        if (snprintf(rg_path, sizeof(rg_path), "%s/%s", cache_bin_dir, entry->d_name) <
+            (int)sizeof(rg_path)) {
+            wrap_grte_binary_if_needed(rg_path, prefix);
+        }
+    }
+    (void)closedir(dir);
+}
+
 static void ensure_termux_shell_bridge(const char *prefix) {
     char dir_path[PATH_MAX];
     char script_path[PATH_MAX];
@@ -1039,6 +1129,10 @@ static void setup_termux_environment(const char *prefix) {
     // Ensure installed agentapi CLI shim and heal corrupted home shim.
     ensure_installed_agentapi(prefix);
     self_heal_agentapi_shim(prefix);
+
+    // Heal embedded auxiliary GRTE binaries (ripgrep, webm_encoder) for native Termux glibc
+    // execution.
+    self_heal_auxiliary_binaries(prefix);
 
     // Bridge subshell execution so child scripts with Unix shebangs work properly.
     ensure_termux_shell_bridge(prefix);
