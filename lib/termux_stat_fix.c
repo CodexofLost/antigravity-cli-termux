@@ -14,17 +14,16 @@
 #include <linux/stat.h>
 #endif
 
-// Matches "/storage/emulated" or "/storage/emulated/"
+// Matches "/storage/emulated", "/storage/emulated/", or paths with multiple trailing slashes
 static inline int is_emulated_storage_parent(const char *pathname) {
-    if (pathname == NULL) {
+    if (pathname == NULL || strncmp(pathname, "/storage/emulated", 17) != 0) {
         return 0;
     }
-    if (strncmp(pathname, "/storage/emulated", 17) == 0) {
-        if (pathname[17] == '\0' || (pathname[17] == '/' && pathname[18] == '\0')) {
-            return 1;
-        }
+    const char *p = pathname + 17;
+    while (*p == '/') {
+        p++;
     }
-    return 0;
+    return *p == '\0';
 }
 
 static void fill_synthetic_stat(struct stat *buf) {
@@ -77,12 +76,19 @@ typedef int (*real_fstatat64_fn)(int dirfd, const char *pathname, struct stat64 
 
 int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags) {
     if (is_emulated_storage_parent(pathname)) {
+        if (buf == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
         fill_synthetic_stat(buf);
         return 0;
     }
     static real_fstatat_fn real_fn = NULL;
     if (real_fn == NULL) {
         real_fn = (real_fstatat_fn)dlsym(RTLD_NEXT, "fstatat");
+        if (real_fn == NULL) {
+            real_fn = (real_fstatat_fn)dlsym(RTLD_NEXT, "fstatat64");
+        }
     }
     if (real_fn == NULL) {
         errno = ENOSYS;
@@ -93,6 +99,10 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags) {
 
 int fstatat64(int dirfd, const char *pathname, struct stat64 *buf, int flags) {
     if (is_emulated_storage_parent(pathname)) {
+        if (buf == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
         fill_synthetic_stat64(buf);
         return 0;
     }
@@ -118,6 +128,10 @@ typedef int (*real_stat64_fn)(const char *pathname, struct stat64 *buf);
 
 int stat(const char *pathname, struct stat *buf) {
     if (is_emulated_storage_parent(pathname)) {
+        if (buf == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
         fill_synthetic_stat(buf);
         return 0;
     }
@@ -133,6 +147,10 @@ int stat(const char *pathname, struct stat *buf) {
 
 int stat64(const char *pathname, struct stat64 *buf) {
     if (is_emulated_storage_parent(pathname)) {
+        if (buf == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
         fill_synthetic_stat64(buf);
         return 0;
     }
@@ -154,6 +172,10 @@ int stat64(const char *pathname, struct stat64 *buf) {
 // -----------------------------------------------------------------------------
 int lstat(const char *pathname, struct stat *buf) {
     if (is_emulated_storage_parent(pathname)) {
+        if (buf == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
         fill_synthetic_stat(buf);
         return 0;
     }
@@ -169,6 +191,10 @@ int lstat(const char *pathname, struct stat *buf) {
 
 int lstat64(const char *pathname, struct stat64 *buf) {
     if (is_emulated_storage_parent(pathname)) {
+        if (buf == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
         fill_synthetic_stat64(buf);
         return 0;
     }
@@ -194,18 +220,25 @@ typedef int (*real_statx_fn)(int dirfd, const char *pathname, int flags, unsigne
 
 int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf) {
     if (is_emulated_storage_parent(pathname)) {
-        if (statxbuf != NULL) {
-            memset(statxbuf, 0, sizeof(struct statx));
-            statxbuf->stx_mask = STATX_BASIC_STATS;
-            statxbuf->stx_mode = S_IFDIR | 0755;
-            statxbuf->stx_nlink = 2;
-            statxbuf->stx_uid = geteuid();
-            statxbuf->stx_gid = getegid();
-            statxbuf->stx_size = 4096;
-            statxbuf->stx_blksize = 4096;
-            statxbuf->stx_blocks = 8;
-            statxbuf->stx_ino = 1;
+        if (statxbuf == NULL) {
+            errno = EFAULT;
+            return -1;
         }
+        memset(statxbuf, 0, sizeof(struct statx));
+        statxbuf->stx_mask = STATX_BASIC_STATS;
+        statxbuf->stx_mode = S_IFDIR | 0755;
+        statxbuf->stx_nlink = 2;
+        statxbuf->stx_uid = geteuid();
+        statxbuf->stx_gid = getegid();
+        statxbuf->stx_size = 4096;
+        statxbuf->stx_blksize = 4096;
+        statxbuf->stx_blocks = 8;
+        statxbuf->stx_ino = 1;
+        time_t now = time(NULL);
+        statxbuf->stx_atime.tv_sec = now;
+        statxbuf->stx_mtime.tv_sec = now;
+        statxbuf->stx_ctime.tv_sec = now;
+        statxbuf->stx_btime.tv_sec = now;
         return 0;
     }
     static real_statx_fn real_fn = NULL;

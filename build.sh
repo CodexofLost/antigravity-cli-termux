@@ -78,6 +78,11 @@ check_prereqs() {
 
 # Compiler detection
 detect_compiler() {
+  if [[ -n "${CC:-}" ]] && command -v "$CC" &>/dev/null; then
+    echo "$CC"
+    return 0
+  fi
+
   if [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
     local ndk_clang
     ndk_clang=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name "aarch64-linux-android*-clang" -print -quit 2>/dev/null)
@@ -163,8 +168,8 @@ fi
 latest_version="${latest_version:-}"
 
 # Prefer an explicit version supplied by the caller.
-if [[ -z "$latest_version" && -n "${AGY_VERSION:-}" ]]; then
-  latest_version="$AGY_VERSION"
+if [[ -n "${AGY_VERSION:-}" ]]; then
+  latest_version="${AGY_VERSION#v}"
 fi
 
 # For local binaries, try executing the artifact itself to read the version.
@@ -183,6 +188,9 @@ if [[ -z "$latest_version" && "$using_local_upstream" -eq 1 ]]; then
   die "Could not determine version for local upstream binary. Set AGY_VERSION to the supplied binary's release version."
 fi
 
+# Ensure leading 'v' is stripped if present
+latest_version="${latest_version#v}"
+
 info "Resolved build version: v$latest_version"
 
 # Apply VA39 memory patches to generate bin/agy.va39.
@@ -196,21 +204,6 @@ data = bytearray(dst.read_bytes())
 def get(off): return struct.unpack_from("<I", data, off)[0]
 def put(off, word): struct.pack_into("<I", data, off, word)
 
-lo, hi = 0, len(data)
-ubfx_count = lsl_count = mask_count = mmap_count = faccessat2_count = 0
-for off in range(lo, hi, 4):
-    w = get(off)
-    if (w & 0x7F800000) == 0x53000000:
-        immr, imms = (w >> 16) & 0x3F, (w >> 10) & 0x3F
-        if immr == 42 and imms == 44:
-            put(off, (w & ~((0x3F << 16) | (0x3F << 10))) | (35 << 16) | (37 << 10)); ubfx_count += 1
-        elif immr == 22 and imms == 21:
-            put(off, (w & ~((0x3F << 16) | (0x3F << 10))) | (29 << 16) | (28 << 10)); lsl_count += 1
-for off in range(lo, hi - 4, 4):
-    if get(off) == 0x92D3800A and get(off + 4) == 0xF2E0000A:
-        put(off, 0x9280000A); put(off + 4, 0xD35DFD4A); mask_count += 1
-for off in range(lo, hi, 4):
-    if get(off) == 0xF2E00029: put(off, 0xD3596129); mmap_count += 1
 word_rewrites = {
     0xD2C20009: 0xD2C00409, 0xD2C2000A: 0xD2C0040A, 0xF2C20008: 0xF2DFF408,
     0xF2C20009: 0xF2DFF409, 0xD2C10009: 0xD2C00209, 0xD2C1000A: 0xD2C0020A,
@@ -218,12 +211,31 @@ word_rewrites = {
     0x92560A6A: 0x925D0A6A, 0xD2C3000D: 0xD2C0060D, 0xD2C3000C: 0xD2C0060C,
     0xD2C08008: 0xD2C00108,
 }
-for off in range(lo, hi, 4):
+
+ubfx_count = lsl_count = mask_count = mmap_count = faccessat2_count = 0
+limit_16 = len(data) - 15
+limit_8 = len(data) - 7
+limit_4 = len(data) - 3
+
+for off in range(0, limit_4, 4):
     w = get(off)
-    if w in word_rewrites: put(off, word_rewrites[w])
-for off in range(0, len(data) - 12, 4):
-    if get(off) == 0xAA1F03E5 and get(off + 4) == 0xAA1F03E6 and get(off + 8) == 0xD28036E0 and (get(off + 12) & 0xFC000000) == 0x94000000:
+    if (w & 0x7F800000) == 0x53000000:
+        immr, imms = (w >> 16) & 0x3F, (w >> 10) & 0x3F
+        if immr == 42 and imms == 44:
+            put(off, (w & ~((0x3F << 16) | (0x3F << 10))) | (35 << 16) | (37 << 10)); ubfx_count += 1
+        elif immr == 22 and imms == 21:
+            put(off, (w & ~((0x3F << 16) | (0x3F << 10))) | (29 << 16) | (28 << 10)); lsl_count += 1
+    elif w == 0xF2E00029:
+        put(off, 0xD3596129); mmap_count += 1
+    elif w in word_rewrites:
+        put(off, word_rewrites[w])
+
+    if off < limit_8 and w == 0x92D3800A and get(off + 4) == 0xF2E0000A:
+        put(off, 0x9280000A); put(off + 4, 0xD35DFD4A); mask_count += 1
+
+    if off < limit_16 and w == 0xAA1F03E5 and get(off + 4) == 0xAA1F03E6 and get(off + 8) == 0xD28036E0 and (get(off + 12) & 0xFC000000) == 0x94000000:
         put(off + 8, 0xD2800600); faccessat2_count += 1
+
 dst.write_bytes(data)
 dst.chmod(0o755)
 print(f"Patched parameters: ubfx={ubfx_count}, lsl={lsl_count}, mask={mask_count}, mmap={mmap_count}, faccessat2={faccessat2_count}")
@@ -237,7 +249,7 @@ ok "Patched binary generated: bin/agy.va39"
 # Compile the native Termux C bootstrapper.
 info "Compiling native Termux C bootstrapper..."
 REPO_NAME="${AGY_REPO:-CodexofLost/antigravity-cli-termux}"
-if ! "$local_cc" -O2 -DAGY_TERMUX_VERSION="\"$latest_version\"" -DAGY_GITHUB_REPO="\"$REPO_NAME\"" -o bin/agy lib/agy_helper.c; then
+if ! "$local_cc" -std=gnu11 -O2 -Wall -Wextra -DAGY_TERMUX_VERSION="\"$latest_version\"" -DAGY_GITHUB_REPO="\"$REPO_NAME\"" -o bin/agy lib/agy_helper.c; then
   die "Compilation of lib/agy_helper.c failed."
 fi
 
@@ -246,7 +258,7 @@ ok "Native Termux bootstrapper compiled successfully."
 
 # Compile the native Termux stat fix preload library.
 info "Compiling native Termux stat fix preload library..."
-if ! "$local_cc" -O2 -fPIC -shared -o bin/libtermux-stat-fix.so lib/termux_stat_fix.c -ldl; then
+if ! "$local_cc" -std=gnu11 -O2 -Wall -Wextra -fPIC -shared -o bin/libtermux-stat-fix.so lib/termux_stat_fix.c -ldl; then
   die "Compilation of lib/termux_stat_fix.c failed."
 fi
 ok "Native Termux stat fix preload library compiled successfully: bin/libtermux-stat-fix.so"

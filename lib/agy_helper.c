@@ -35,9 +35,29 @@
 #define AGY_GITHUB_REPO "CodexofLost/antigravity-cli-termux"
 #endif
 
+static int agy_is_valid_repo_name(const char *repo) {
+    if (repo == NULL || repo[0] == '\0') {
+        return 0;
+    }
+
+    int slash_count = 0;
+    for (const unsigned char *p = (const unsigned char *)repo; *p != '\0'; p++) {
+        if (*p == '/') {
+            slash_count++;
+            if (slash_count > 1) {
+                return 0;
+            }
+        } else if (!isalnum(*p) && *p != '.' && *p != '_' && *p != '-') {
+            return 0;
+        }
+    }
+
+    return (slash_count == 1 && repo[0] != '/' && repo[strlen(repo) - 1] != '/');
+}
+
 static const char *get_agy_repo(void) {
     const char *env_repo = getenv("AGY_UPDATE_REPO");
-    if (env_repo != NULL && env_repo[0] != '\0') {
+    if (env_repo != NULL && env_repo[0] != '\0' && agy_is_valid_repo_name(env_repo)) {
         return env_repo;
     }
     return AGY_GITHUB_REPO;
@@ -461,12 +481,18 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "fi; "
         "tar -tzf \"$tmp/antigravity-termux-standalone.tar.gz\" >/dev/null && "
         "tar -xzf \"$tmp/antigravity-termux-standalone.tar.gz\" -C \"$tmp\" "
-        "agy agy.va39 && "
+        "agy agy.va39 libtermux-stat-fix.so && "
         "test -s \"$tmp/agy\" && test -x \"$tmp/agy\" && "
         "test -s \"$tmp/agy.va39\" && test -x \"$tmp/agy.va39\" && "
         "\"$tmp/agy\" --help >/dev/null 2>&1 && "
         "install -m 0755 \"$tmp/agy\" \"$new_agy\" && "
         "install -m 0755 \"$tmp/agy.va39\" \"$new_payload\" && "
+        "[ ! -f \"$tmp/libtermux-stat-fix.so\" ] || "
+        "install -m 0755 \"$tmp/libtermux-stat-fix.so\" "
+        "\"$install_dir/../lib/libtermux-stat-fix.so\" 2>/dev/null || "
+        "install -m 0755 \"$tmp/libtermux-stat-fix.so\" "
+        "\"${PREFIX:-/data/data/com.termux/files/usr}/lib/libtermux-stat-fix.so\" 2>/dev/null || "
+        "true; "
         "mv -f \"$install_dir/agy\" \"$old_agy\" && "
         "mv -f \"$install_dir/agy.va39\" \"$old_payload\" && "
         "mv -f \"$new_payload\" \"$install_dir/agy.va39\" && "
@@ -613,25 +639,22 @@ static int perform_startup_update_check(const char *dir, int argc, char **argv) 
 
 static int is_native_termux(void) {
     const char *termux_version = getenv("TERMUX_VERSION");
+    if (termux_version != NULL && termux_version[0] != '\0') {
+        return 1;
+    }
+
     const char *prefix = getenv("PREFIX");
-    char bin_path[PATH_MAX];
-    int written = 0;
-
-    if (termux_version == NULL || termux_version[0] == '\0') {
-        return 0;
-    }
     if (prefix == NULL || prefix[0] == '\0') {
-        return 0;
+        prefix = "/data/data/com.termux/files/usr";
     }
-    written = snprintf(bin_path, sizeof(bin_path), "%s/bin", prefix);
-    if (written < 0 || written >= (int)sizeof(bin_path)) {
-        return 0;
-    }
-    if (access(bin_path, F_OK) != 0) {
+
+    char sh_path[PATH_MAX];
+    int written = snprintf(sh_path, sizeof(sh_path), "%s/bin/sh", prefix);
+    if (written < 0 || written >= (int)sizeof(sh_path)) {
         return 0;
     }
 
-    return 1;
+    return access(sh_path, X_OK) == 0;
 }
 
 static void print_non_termux_message(void) {
@@ -740,7 +763,8 @@ static int require_resolver_config(const char *prefix) {
     }
 
     // Ensure glibc resolv.conf is linked or synchronized
-    if (access(glibc_resolv_path, F_OK) != 0) {
+    struct stat resolv_st;
+    if (lstat(glibc_resolv_path, &resolv_st) != 0) {
         if (access(glibc_etc_dir, F_OK) != 0) {
             (void)mkdir(glibc_etc_dir, 0755);
         }
@@ -1006,7 +1030,7 @@ static void ensure_termux_shell_bridge(const char *prefix) {
             "  chmod 0755 \"$_agy_shim\" 2>/dev/null || true\n"
             "fi\n"
             "agentapi() {\n"
-            "  exec \"%s/bin/agy\" agentapi \"$@\"\n"
+            "  \"%s/bin/agy\" agentapi \"$@\"\n"
             "}\n"
             "export -f agentapi 2>/dev/null || true\n",
             bionic_preload, prefix, prefix, prefix, prefix, prefix, prefix);
@@ -1046,7 +1070,8 @@ static void bootstrap_termux_storage(void) {
         return;
     }
 
-    if (access(shared_link, F_OK) != 0) {
+    struct stat link_st;
+    if (lstat(shared_link, &link_st) != 0) {
         if (access(storage_dir, F_OK) != 0) {
             (void)mkdir(storage_dir, 0755);
         }
