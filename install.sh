@@ -299,6 +299,17 @@ ensure_dependencies() {
     info "Resolving required Termux packages: ${needed_pkgs[*]}"
     if command -v pkg >/dev/null 2>&1; then
       pkg install -y glibc-repo 2>/dev/null || true
+
+      # Block TUR false-essential shadow utilities from force-installing 400MB+ bloat
+      # while allowing glibc updates and on-demand glibc package installs.
+      local pref_dir="${TERMUX_PREFIX}/etc/apt/preferences.d"
+      mkdir -p "$pref_dir" 2>/dev/null || true
+      cat << 'EOF' > "${pref_dir}/no-shadow-glibc"
+Package: glibc-runner bash-glibc coreutils-glibc tar-glibc sed-glibc grep-glibc less-glibc findutils-glibc util-linux-glibc xz-utils-glibc bzip2-glibc curl-glibc
+Pin: release *
+Pin-Priority: -1
+EOF
+
       pkg install -y "${needed_pkgs[@]}" 2>/dev/null || true
     fi
   fi

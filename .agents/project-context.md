@@ -73,7 +73,8 @@
 
 ### 3. Self-Healing Installer (`install.sh`)
 - Enforces native Termux validation (rejects PRoot).
-- `ensure_dependencies()` automatically checks and installs required Termux packages: `glibc`, `glibc-repo`, `resolv-conf`, `ca-certificates`, `termux-exec-glibc`, `termux-exec`, `termux-tools`, `qemu-user-aarch64` via `pkg`.
+- `ensure_dependencies()` automatically checks and installs required Termux packages: `glibc`, `glibc-repo`, `resolv-conf`, `ca-certificates`, `termux-exec-glibc`, `termux-exec`, `termux-tools` via `pkg`.
+- **Precision APT Preferences Pinning:** Automatically provisions `$PREFIX/etc/apt/preferences.d/no-shadow-glibc` during dependency setup. Pins the 12 TUR shadow utilities (`glibc-runner`, `bash-glibc`, `coreutils-glibc`, etc.) to priority `-1` while maintaining `glibc` and `termux-exec-glibc` at priority `500`. This prevents `pkg upgrade` and `dist-upgrade` from force-installing 400MB+ of unwanted packages while ensuring users automatically receive `glibc` bug fixes/upgrades and can install other glibc tools on demand.
 - Auto-generates fallback `resolv.conf` and `hosts` if not present.
 - Ensures `$PREFIX/tmp` exists with secure `0700` permissions.
 - Installs twin binaries (`agy`, `agy.va39`) and `agentapi` CLI bridge to `$PREFIX/bin/`.
