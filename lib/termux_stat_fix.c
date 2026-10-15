@@ -1,9 +1,12 @@
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -13,6 +16,29 @@
 #ifdef __linux__
 #include <linux/stat.h>
 #endif
+
+static const char *get_synthetic_emulated_dir(void) {
+    static char synth_dir[PATH_MAX] = {0};
+    if (synth_dir[0] == '\0') {
+        const char *prefix = getenv("PREFIX");
+        if (prefix == NULL || prefix[0] == '\0') {
+            prefix = "/data/data/com.termux/files/usr";
+        }
+        if (snprintf(synth_dir, sizeof(synth_dir), "%s/tmp/.synthetic_emulated", prefix) <
+            (int)sizeof(synth_dir)) {
+            (void)mkdir(synth_dir, 0755);
+            char link_path[PATH_MAX];
+            if (snprintf(link_path, sizeof(link_path), "%s/0", synth_dir) <
+                (int)sizeof(link_path)) {
+                struct stat st;
+                if (lstat(link_path, &st) != 0) {
+                    (void)symlink("/storage/emulated/0", link_path);
+                }
+            }
+        }
+    }
+    return synth_dir;
+}
 
 // Matches "/storage/emulated", "/storage/emulated/", or paths with multiple trailing slashes
 static inline int is_emulated_storage_parent(const char *pathname) {
@@ -252,3 +278,66 @@ int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct 
     return real_fn(dirfd, pathname, flags, mask, statxbuf);
 }
 #endif
+
+// -----------------------------------------------------------------------------
+// access & faccessat
+// -----------------------------------------------------------------------------
+typedef int (*real_access_fn)(const char *pathname, int mode);
+typedef int (*real_faccessat_fn)(int dirfd, const char *pathname, int mode, int flags);
+
+int access(const char *pathname, int mode) {
+    if (is_emulated_storage_parent(pathname)) {
+        if ((mode & W_OK) != 0) {
+            errno = EACCES;
+            return -1;
+        }
+        return 0;
+    }
+    static real_access_fn real_fn = NULL;
+    if (real_fn == NULL) {
+        real_fn = (real_access_fn)dlsym(RTLD_NEXT, "access");
+    }
+    if (real_fn == NULL) {
+        return faccessat(AT_FDCWD, pathname, mode, 0);
+    }
+    return real_fn(pathname, mode);
+}
+
+int faccessat(int dirfd, const char *pathname, int mode, int flags) {
+    if (is_emulated_storage_parent(pathname)) {
+        if ((mode & W_OK) != 0) {
+            errno = EACCES;
+            return -1;
+        }
+        return 0;
+    }
+    static real_faccessat_fn real_fn = NULL;
+    if (real_fn == NULL) {
+        real_fn = (real_faccessat_fn)dlsym(RTLD_NEXT, "faccessat");
+    }
+    if (real_fn == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return real_fn(dirfd, pathname, mode, flags);
+}
+
+// -----------------------------------------------------------------------------
+// opendir
+// -----------------------------------------------------------------------------
+typedef DIR *(*real_opendir_fn)(const char *name);
+
+DIR *opendir(const char *name) {
+    if (is_emulated_storage_parent(name)) {
+        name = get_synthetic_emulated_dir();
+    }
+    static real_opendir_fn real_fn = NULL;
+    if (real_fn == NULL) {
+        real_fn = (real_opendir_fn)dlsym(RTLD_NEXT, "opendir");
+    }
+    if (real_fn == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return real_fn(name);
+}

@@ -997,17 +997,22 @@ static void ensure_termux_shell_bridge(const char *prefix) {
 
     FILE *fp = fopen(script_path, "w");
     if (fp != NULL) {
-        (void)fprintf(fp,
-                      "#!/system/bin/sh\n"
-                      "export LD_PRELOAD=\"%s\"\n"
-                      "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
-                      "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
-                      "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
-                      "esac\n"
-                      "export TMPDIR=\"${TMPDIR:-%s/tmp}\"\n"
-                      "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-%s/tmp}\"\n"
-                      "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
-                      bionic_preload, real_shell, prefix, prefix, prefix, real_shell);
+        (void)fprintf(
+            fp,
+            "#!/system/bin/sh\n"
+            "export LD_PRELOAD=\"%s\"\n"
+            "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
+            "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
+            "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
+            "esac\n"
+            "if [ -z \"${TMPDIR:-}\" ] || [ ! -w \"${TMPDIR}\" ]; then\n"
+            "  export TMPDIR=\"%s/tmp\"\n"
+            "fi\n"
+            "if [ -z \"${XDG_RUNTIME_DIR:-}\" ] || [ ! -w \"${XDG_RUNTIME_DIR}\" ]; then\n"
+            "  export XDG_RUNTIME_DIR=\"%s/tmp\"\n"
+            "fi\n"
+            "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
+            bionic_preload, real_shell, prefix, prefix, prefix, real_shell);
         (void)fclose(fp);
         (void)chmod(script_path, 0755);
     }
@@ -1020,8 +1025,12 @@ static void ensure_termux_shell_bridge(const char *prefix) {
             "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
             "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
             "esac\n"
-            "export TMPDIR=\"${TMPDIR:-%s/tmp}\"\n"
-            "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-%s/tmp}\"\n"
+            "if [ -z \"${TMPDIR:-}\" ] || [ ! -w \"${TMPDIR}\" ]; then\n"
+            "  export TMPDIR=\"%s/tmp\"\n"
+            "fi\n"
+            "if [ -z \"${XDG_RUNTIME_DIR:-}\" ] || [ ! -w \"${XDG_RUNTIME_DIR}\" ]; then\n"
+            "  export XDG_RUNTIME_DIR=\"%s/tmp\"\n"
+            "fi\n"
             "_agy_shim=\"${HOME:-/data/data/com.termux/files/home}/.gemini/antigravity-cli/bin/"
             "agentapi\"\n"
             "if [ -f \"$_agy_shim\" ] && grep -q \"ld-linux\" \"$_agy_shim\" 2>/dev/null; then\n"
@@ -1108,10 +1117,11 @@ static void setup_termux_environment(const char *prefix) {
             (void)mkdir(path_buf, 0700);
         }
         const char *env_tmp = getenv("TMPDIR");
-        if (env_tmp == NULL || env_tmp[0] == '\0') {
+        if (env_tmp == NULL || env_tmp[0] == '\0' || access(env_tmp, W_OK) != 0) {
             setenv("TMPDIR", path_buf, 1);
         }
-        if (getenv("XDG_RUNTIME_DIR") == NULL) {
+        const char *env_xdg = getenv("XDG_RUNTIME_DIR");
+        if (env_xdg == NULL || env_xdg[0] == '\0' || access(env_xdg, W_OK) != 0) {
             setenv("XDG_RUNTIME_DIR", path_buf, 1);
         }
     }
