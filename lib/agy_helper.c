@@ -1451,11 +1451,8 @@ int main(int argc, char **argv) {
     new_argv[arg_idx++] = "--library-path";
     new_argv[arg_idx++] = lib_path;
     if (preload) {
-        new_argv[arg_idx++] = "--preload";
-        new_argv[arg_idx++] = (char *)preload;
+        setenv("LD_PRELOAD", preload, 1);
     }
-    new_argv[arg_idx++] = "--argv0";
-    new_argv[arg_idx++] = "agy";
     new_argv[arg_idx++] = patched_bin;
 
     for (int i = 1; i < argc; i++) {
