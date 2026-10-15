@@ -34,20 +34,31 @@ A dedicated Python patching process is executed during the build to:
 * Adjust page-alignment logic and `mmap` parameters.
 * Rewrite low-level library wrappers (`faccessat2`) to guarantee absolute compatibility with 39-bit systems.
 
-#### 2. Relocatable C Bootstrapper
+#### 2. Relocatable C Bootstrapper & Process Supervisor
 Standard Termux runs under the Android Bionic libc environment, injecting specific preloads (`LD_PRELOAD=/data/.../libtermux-exec.so`) to intercept calls. However, because the patched binary is built under glibc, loading it directly causes immediate crashes (`invalid ELF header`) when the glibc dynamic linker processes Bionic preloads.
 To circumvent this, a relocatable C bootstrapper (`agy`) is compiled:
 * **Dynamic Resolution**: Resolves its own folder at runtime using `/proc/self/exe` via `readlink`, enabling the package to be extracted and executed in *any* directory without wrapper scripts.
-* **Environment Cleansing**: Unsets conflicting environment variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`) before executing the loader.
-* **Redirection**: Configures the native Termux CA bundle (`SSL_CERT_FILE`) and DNS routing (`GODEBUG=netdns=cgo`), then passes execution cleanly to the glibc loader.
+* **Environment Cleansing & Bionic Isolation**: Unsets conflicting environment variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`) before executing the glibc loader. Crucially, it leaves `LD_PRELOAD` unset for the engine, ensuring child Bionic processes (such as `statusline` spawning `sh` or internal helper tools) never inherit glibc preloads (`libc.so.6 not found`).
+* **Sandbox Self-Execution Compatibility**: Preserves strict command-line argument formatting expected by Google's upstream `selfexec.parseLoaderLaunch`, enabling internal sandbox and worker subprocess re-execution without dynamic linker panics (`invalid argument`).
+* **Writeable TMPDIR & Runtime Hardening**: Ensures `TMPDIR=$PREFIX/tmp` and `XDG_RUNTIME_DIR=$PREFIX/tmp` exist with `0700` permissions and verifies directory writeability before accepting inherited variables, completely preventing `Permission denied` errors from Android's restricted `0771` system `/tmp`.
+* **Redirection & Network**: Configures the native Termux CA bundle (`SSL_CERT_FILE`), Node.js MCP certs (`NODE_EXTRA_CA_CERTS`), and DNS routing (`GODEBUG=netdns=cgo`), dynamically synchronizing active Android system DNS properties into `$PREFIX/etc/resolv.conf`.
+* **Subshell Shebang Bridge**: Automatically manages `$PREFIX/libexec/agy/termux-shell` and `termux-shell-env`, ensuring all tool invocations, subagents, and background MCP processes inherit Bionic's path redirection and stat fixes without `bad interpreter` errors.
+* **Subreaper & Process Group Supervision**: Designates the bootstrapper as a subreaper (`PR_SET_CHILD_SUBREAPER`) in a dedicated process group (`setpgid`), ensuring orphaned background grandchildren (such as MCP servers) are cleanly reaped on exit.
 
-#### 3. LSE (Large System Extensions) & QEMU Support
+#### 3. Android Shared Storage & FUSE Compatibility (`libtermux-stat-fix.so`)
+Android's scoped storage enforces strict root ownership (`0700 root:root`) on `/storage/emulated`, restricting direct access to the primary user profile (`/storage/emulated/0`).
+This fork compiles and injects `libtermux-stat-fix.so` to provide transparent filesystem virtualization:
+* **Synthetic Stat & Permissions**: Intercepts `stat()`, `lstat()`, `statx()`, `access()`, and `faccessat()` for `/storage/emulated`, synthesizing valid directory attributes and permissions.
+* **Directory Enumeration**: Intercepts `opendir()` on `/storage/emulated` to yield synthetic entries (`.`, `..`, `0`), enabling standard library path walkers and tools to traverse seamlessly into user storage.
+* **Git Dubious Ownership Resolution**: Completely eliminates Git 2.35+ `fatal: detected dubious ownership` failures across Android shared storage and sets `GIT_DISCOVERY_ACROSS_FILESYSTEM=1` across FUSE mount boundaries.
+
+#### 4. LSE (Large System Extensions) & QEMU Support
 The engine requires ARMv8.1-A Atomics (LSE) to run natively. On older ARMv8.0-A CPUs lacking LSE support, the binary will crash with an "Illegal Instruction".
 This fork includes an automated compatibility layer:
 * **Detection**: The installer and bootstrapper automatically detect if the CPU lacks LSE support via `getauxval(AT_HWCAP)`.
 * **QEMU Emulation**: If LSE is missing and `qemu-aarch64` is already installed, the bootstrapper wraps engine execution through it. If QEMU is missing, the installer reports that the `qemu-user-aarch64` package may be needed and exits without installing packages automatically.
 
-#### 4. Native Termux Only
+#### 5. Native Termux Only
 This standalone port is intentionally scoped to native Termux on Android. PRoot environments can run Google's official Antigravity CLI binary directly, so this project no longer ships a PRoot compatibility layer.
 
 If you are inside PRoot, use the official installer instead:
@@ -56,7 +67,7 @@ If you are inside PRoot, use the official installer instead:
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-#### 5. In-Place Self-Updating
+#### 6. In-Place Self-Updating
 The C bootstrapper intercepts the `update` subcommand and provides a seamless in-place update mechanism that updates both the patched engine and itself without needing complex wrappers or manually executing curl commands.
 
 Interactive launches also perform a silent, five-second-bounded release check. Nothing is printed when the installed release is current, newer than the published release, or GitHub cannot be reached. Only a strictly newer semantic version triggers the same install prompt as `agy update`.
