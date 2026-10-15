@@ -1357,8 +1357,6 @@ int main(int argc, char **argv) {
     char dynamic_loader[PATH_MAX];
     char prefix_path[PATH_MAX];
     char qemu_path[PATH_MAX];
-    char preload_lib[PATH_MAX];
-    const char *preload = NULL;
     const char *prefix = getenv("PREFIX");
     const char *loader = NULL;
     const char *dir = NULL;
@@ -1430,13 +1428,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Check for glibc libtermux-exec wrapper for standard path rewriting (/bin/sh, /usr/bin/env).
-    written =
-        snprintf(preload_lib, sizeof(preload_lib), "%s/glibc/lib/libtermux-exec.so", prefix_path);
-    if (written > 0 && written < (int)sizeof(preload_lib) && access(preload_lib, R_OK) == 0) {
-        preload = preload_lib;
-    }
-
     // Construct path to the patched binary
     written = snprintf(patched_bin, sizeof(patched_bin), "%s/agy.va39", dir);
     if (written < 0 || written >= (int)sizeof(patched_bin)) {
@@ -1444,8 +1435,8 @@ int main(int argc, char **argv) {
     }
 
     // We allocate enough space for: qemu + loader + "--library-path" + lib_path
-    // + "--preload" + preload + "--argv0" + "agy" + patched_bin + user args + NULL
-    int new_argc = argc + 10;
+    // + patched_bin + user args + NULL
+    int new_argc = argc + 6;
     new_argv = malloc((size_t)new_argc * sizeof(*new_argv));
     if (!new_argv) {
         return 1;
@@ -1460,9 +1451,6 @@ int main(int argc, char **argv) {
     new_argv[arg_idx++] = (char *)loader;
     new_argv[arg_idx++] = "--library-path";
     new_argv[arg_idx++] = lib_path;
-    if (preload) {
-        setenv("LD_PRELOAD", preload, 1);
-    }
     new_argv[arg_idx++] = patched_bin;
 
     for (int i = 1; i < argc; i++) {

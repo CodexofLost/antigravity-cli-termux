@@ -31,8 +31,7 @@
 ### 2. Relocatable C Bootstrapper (`lib/agy_helper.c`)
 - Compiles via `$PREFIX/bin/clang` to `bin/agy`.
 - **Runtime Environment Isolation & Preload Bridging:**
-  - Unsets conflicting Android Bionic preloads (`LD_PRELOAD`, `LD_LIBRARY_PATH`) that cause `invalid ELF header` panics in glibc.
-  - Auto-detects glibc-native `libtermux-exec.so` (`$PREFIX/glibc/lib/libtermux-exec.so`) and sets `LD_PRELOAD` in the environment before launching `ld-linux` (instead of passing `--preload` or `--argv0` on `argv`). This preserves strict `/proc/self/cmdline` structure compatibility with Google's upstream `selfexec.parseLoaderLaunch`, enabling internal sandbox and worker subprocess re-execution without dynamic linker panics (`invalid argument`).
+  - Unsets conflicting Android Bionic preloads (`LD_PRELOAD`, `LD_LIBRARY_PATH`) that cause `invalid ELF header` panics in glibc, and leaves `LD_PRELOAD` unset for the glibc dynamic linker and engine invocation. This ensures child Bionic processes (e.g. `statusline_runner` spawning `sh`, internal scripts) never inherit glibc preloads (`libc.so.6 not found`), while preserving clean `/proc/self/cmdline` structure compatibility (`[ld-linux, "--library-path", lib_path, patched_bin, ...]`) expected by Google's upstream `selfexec.parseLoaderLaunch`.
   - Sets `SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem` and `GODEBUG=netdns=cgo`.
   - Configures `NODE_EXTRA_CA_CERTS=$PREFIX/etc/tls/cert.pem` for Node.js MCP server TLS verification.
   - Ensures `TMPDIR=$PREFIX/tmp` and `XDG_RUNTIME_DIR=$PREFIX/tmp` exist with permissions `0700` and verifies active directory writeability before accepting inherited variables, completely preventing `Permission denied` failures on Android's restricted `0771` system `/tmp`.
