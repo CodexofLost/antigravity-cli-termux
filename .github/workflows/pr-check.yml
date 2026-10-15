@@ -166,7 +166,6 @@ jobs:
         python
         clang
         glibc
-        glibc-runner
         resolv-conf
       exclude-paths: |
         .git
@@ -212,7 +211,6 @@ jobs:
         curl
         tar
         glibc
-        glibc-runner
         resolv-conf
       exclude-paths: |
         .git

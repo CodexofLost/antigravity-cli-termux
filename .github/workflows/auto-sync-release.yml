@@ -96,7 +96,6 @@ jobs:
         curl
         tar
         glibc
-        glibc-runner
         resolv-conf
       copy-paths: |
         artifact
@@ -153,7 +152,6 @@ jobs:
       packages: |
         ca-certificates
         glibc
-        glibc-runner
         resolv-conf
         tar
       copy-paths: |

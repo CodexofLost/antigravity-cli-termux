@@ -277,11 +277,6 @@ ensure_dependencies() {
     needed_pkgs+=("resolv-conf")
   fi
 
-  local glibc_exec="${TERMUX_PREFIX}/glibc/lib/libtermux-exec.so"
-  if [[ ! -f "$glibc_exec" ]]; then
-    needed_pkgs+=("termux-exec-glibc")
-  fi
-
   local bionic_exec="${TERMUX_PREFIX}/lib/libtermux-exec.so"
   if [[ ! -f "$bionic_exec" ]]; then
     needed_pkgs+=("termux-exec")
