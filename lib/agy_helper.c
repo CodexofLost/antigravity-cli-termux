@@ -5,14 +5,20 @@
 #include <errno.h>
 #include <libgen.h>
 #include <limits.h>
+#include <poll.h>
+#include <pty.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef HWCAP_ATOMICS
@@ -28,7 +34,7 @@
 #endif
 
 #ifndef AGY_TERMUX_VERSION
-#define AGY_TERMUX_VERSION "1.1.28"
+#define AGY_TERMUX_VERSION "1.4.0"
 #endif
 
 #ifndef AGY_GITHUB_REPO
@@ -997,22 +1003,17 @@ static void ensure_termux_shell_bridge(const char *prefix) {
 
     FILE *fp = fopen(script_path, "w");
     if (fp != NULL) {
-        (void)fprintf(
-            fp,
-            "#!/system/bin/sh\n"
-            "export LD_PRELOAD=\"%s\"\n"
-            "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
-            "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
-            "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
-            "esac\n"
-            "if [ -z \"${TMPDIR:-}\" ] || [ ! -w \"${TMPDIR}\" ]; then\n"
-            "  export TMPDIR=\"%s/tmp\"\n"
-            "fi\n"
-            "if [ -z \"${XDG_RUNTIME_DIR:-}\" ] || [ ! -w \"${XDG_RUNTIME_DIR}\" ]; then\n"
-            "  export XDG_RUNTIME_DIR=\"%s/tmp\"\n"
-            "fi\n"
-            "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
-            bionic_preload, real_shell, prefix, prefix, prefix, real_shell);
+        (void)fprintf(fp,
+                      "#!/system/bin/sh\n"
+                      "export LD_PRELOAD=\"%s\"\n"
+                      "export SHELL=\"${AGY_REAL_SHELL:-%s}\"\n"
+                      "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
+                      "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
+                      "esac\n"
+                      "export TMPDIR=\"${TMPDIR:-%s/tmp}\"\n"
+                      "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-%s/tmp}\"\n"
+                      "exec \"${AGY_REAL_SHELL:-%s}\" \"$@\"\n",
+                      bionic_preload, real_shell, prefix, prefix, prefix, real_shell);
         (void)fclose(fp);
         (void)chmod(script_path, 0755);
     }
@@ -1025,12 +1026,8 @@ static void ensure_termux_shell_bridge(const char *prefix) {
             "case \"${ANTIGRAVITY_AGENTAPI_EXE:-}\" in\n"
             "  *ld-linux*|\"\") export ANTIGRAVITY_AGENTAPI_EXE=\"%s/bin/agy\" ;;\n"
             "esac\n"
-            "if [ -z \"${TMPDIR:-}\" ] || [ ! -w \"${TMPDIR}\" ]; then\n"
-            "  export TMPDIR=\"%s/tmp\"\n"
-            "fi\n"
-            "if [ -z \"${XDG_RUNTIME_DIR:-}\" ] || [ ! -w \"${XDG_RUNTIME_DIR}\" ]; then\n"
-            "  export XDG_RUNTIME_DIR=\"%s/tmp\"\n"
-            "fi\n"
+            "export TMPDIR=\"${TMPDIR:-%s/tmp}\"\n"
+            "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-%s/tmp}\"\n"
             "_agy_shim=\"${HOME:-/data/data/com.termux/files/home}/.gemini/antigravity-cli/bin/"
             "agentapi\"\n"
             "if [ -f \"$_agy_shim\" ] && grep -q \"ld-linux\" \"$_agy_shim\" 2>/dev/null; then\n"
@@ -1117,11 +1114,10 @@ static void setup_termux_environment(const char *prefix) {
             (void)mkdir(path_buf, 0700);
         }
         const char *env_tmp = getenv("TMPDIR");
-        if (env_tmp == NULL || env_tmp[0] == '\0' || access(env_tmp, W_OK) != 0) {
+        if (env_tmp == NULL || env_tmp[0] == '\0') {
             setenv("TMPDIR", path_buf, 1);
         }
-        const char *env_xdg = getenv("XDG_RUNTIME_DIR");
-        if (env_xdg == NULL || env_xdg[0] == '\0' || access(env_xdg, W_OK) != 0) {
+        if (getenv("XDG_RUNTIME_DIR") == NULL) {
             setenv("XDG_RUNTIME_DIR", path_buf, 1);
         }
     }
@@ -1201,24 +1197,14 @@ static volatile pid_t g_child_pid = 0;
 static volatile sig_atomic_t g_child_exited = 0;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static volatile int g_child_exit_status = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile sig_atomic_t g_terminate_requested = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile sig_atomic_t g_received_signal = 0;
 
-static void handle_forward_signal(int sig) {
-    // Avoid receiving our own forwarded signal by temporarily ignoring it
-    struct sigaction sa_ign;
-    memset(&sa_ign, 0, sizeof(sa_ign));
-    sa_ign.sa_handler = SIG_IGN;
-    sigemptyset(&sa_ign.sa_mask);
-    (void)sigaction(sig, &sa_ign, NULL);
-
-    (void)kill(-getpgrp(), sig);
-
-    // Re-arm the forward signal handler
-    struct sigaction sa_fwd;
-    memset(&sa_fwd, 0, sizeof(sa_fwd));
-    sa_fwd.sa_handler = handle_forward_signal;
-    sa_fwd.sa_flags = SA_RESTART;
-    sigemptyset(&sa_fwd.sa_mask);
-    (void)sigaction(sig, &sa_fwd, NULL);
+static void handle_terminate_signal(int sig) {
+    g_terminate_requested = 1;
+    g_received_signal = sig;
 }
 
 static void handle_sigchld(int sig) {
@@ -1235,10 +1221,103 @@ static void handle_sigchld(int sig) {
     errno = saved_errno;
 }
 
-static void handle_sigwinch(int sig) {
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile sig_atomic_t g_master_fd = -1;
+
+static void handle_sigint(int sig) {
     (void)sig;
     if (g_child_pid > 0) {
+        (void)kill(g_child_pid, SIGINT);
+    }
+}
+
+static void handle_sigwinch(int sig) {
+    (void)sig;
+    int mfd = g_master_fd;
+    if (mfd >= 0) {
+        struct winsize ws;
+        if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0) {
+            (void)ioctl(mfd, TIOCSWINSZ, &ws);
+        }
+    }
+    if (g_child_pid > 0) {
         (void)kill(g_child_pid, SIGWINCH);
+    }
+}
+
+static void kill_process_group_members(pid_t pgrp, pid_t self_pid, int sig) {
+    DIR *proc = opendir("/proc");
+    if (!proc) {
+        return;
+    }
+    struct dirent *entry = NULL;
+    while ((entry = readdir(proc)) != NULL) {
+        if (!isdigit((unsigned char)entry->d_name[0])) {
+            continue;
+        }
+        pid_t pid = (pid_t)atoi(entry->d_name);
+        if (pid <= 1 || pid == self_pid) {
+            continue;
+        }
+        if (getpgid(pid) == pgrp) {
+            (void)kill(pid, sig);
+        }
+    }
+    (void)closedir(proc);
+}
+
+static void restore_terminal_state(int tty_fd, const struct termios *orig_termios,
+                                   pid_t orig_pgrp) {
+    if (tty_fd < 0 || !isatty(tty_fd)) {
+        return;
+    }
+
+    // Exact Bubble Tea v2 / Ultraviolet teardown sequence emitted on /exit:
+    // 1. Reset modifyOtherKeys: \x1b[>4m
+    // 2. Pop and reset Kitty keyboard protocol: \x1b[<u\x1b[=0u
+    // 3. Reset bracketed paste mode: \x1b[?2004l
+    // 4. Reset focus in/out reporting: \x1b[?1004l
+    // 5. Reset mouse tracking: \x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l
+    // 6. Exit alternate screen and restore cursor: \x1b[?1049l\x1b[?1047l\x1b8
+    // 7. Reset sync updates & graphemes: \x1b[?2026l\x1b[?2027l
+    // 8. Reset cursor shape: \x1b[0 q
+    // 9. Show cursor: \x1b[?25h
+    // 10. Reset dynamic terminal colors & progress: \x1b]112\x07\x1b]111\x07\x1b]110\x07\x1b]9;4;0\x07
+    // 11. Reset SGR formatting: \x1b[0m
+    // 12. Clear current prompt line and erase everything below to bottom of screen: \r\x1b[2K\x1b[J
+    const char reset_seq[] =
+        "\033[>4m"
+        "\033[<u\033[=0u"
+        "\033[?2004l"
+        "\033[?1004l"
+        "\033[?1000l\033[?1002l\033[?1003l\033[?1006l"
+        "\033[?1049l\033[?1047l\0338"
+        "\033[?2026l\033[?2027l"
+        "\033[0 q"
+        "\033[?25h"
+        "\033]112\007\033]111\007\033]110\007"
+        "\033]9;4;0\007"
+        "\033[0m"
+        "\r\033[2K\033[J";
+    (void)write(tty_fd, reset_seq, sizeof(reset_seq) - 1);
+
+    // Flush unread input queue and restore original terminal attributes
+    if (orig_termios != NULL) {
+        (void)tcflush(tty_fd, TCIFLUSH);
+        (void)tcsetattr(tty_fd, TCSAFLUSH, orig_termios);
+    }
+
+    // Return foreground terminal control to parent shell
+    if (orig_pgrp > 0) {
+        struct sigaction sa_ttou_ign;
+        memset(&sa_ttou_ign, 0, sizeof(sa_ttou_ign));
+        sa_ttou_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ttou_ign.sa_mask);
+        struct sigaction sa_ttou_old;
+        memset(&sa_ttou_old, 0, sizeof(sa_ttou_old));
+        (void)sigaction(SIGTTOU, &sa_ttou_ign, &sa_ttou_old);
+        (void)tcsetpgrp(tty_fd, orig_pgrp);
+        (void)sigaction(SIGTTOU, &sa_ttou_old, NULL);
     }
 }
 
@@ -1247,8 +1326,221 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
     // Designate this bootstrapper as a subreaper to adopt orphaned grandchildren.
     (void)prctl(PR_SET_CHILD_SUBREAPER, 1UL, 0UL, 0UL, 0UL);
 
-    // Establish a clean process group and maintain terminal foreground control if interactive.
-    if (setpgid(0, 0) == 0 && isatty(STDIN_FILENO)) {
+    int tty_fd = -1;
+    struct termios orig_termios;
+    int have_termios = 0;
+    pid_t orig_pgrp = 0;
+
+    if (isatty(STDIN_FILENO)) {
+        tty_fd = STDIN_FILENO;
+    } else if (isatty(STDOUT_FILENO)) {
+        tty_fd = STDOUT_FILENO;
+    } else if (isatty(STDERR_FILENO)) {
+        tty_fd = STDERR_FILENO;
+    }
+
+    if (tty_fd >= 0) {
+        if (tcgetattr(tty_fd, &orig_termios) == 0) {
+            have_termios = 1;
+        }
+        orig_pgrp = tcgetpgrp(tty_fd);
+    }
+
+    // Interactive terminal session: use a PTY forwarder to intercept Ctrl+Z
+    // and naturally trigger Antigravity's authentic /exit command.
+    if (tty_fd >= 0 && isatty(STDIN_FILENO)) {
+        struct winsize ws;
+        int have_ws = 0;
+        if (ioctl(tty_fd, TIOCGWINSZ, &ws) == 0) {
+            have_ws = 1;
+        }
+
+        int master_fd = -1;
+        pid_t parent_pid = getpid();
+        pid_t child_pid = forkpty(&master_fd, NULL, have_termios ? &orig_termios : NULL,
+                                  have_ws ? &ws : NULL);
+        if (child_pid == 0) {
+            (void)signal(SIGINT, SIG_DFL);
+            (void)signal(SIGTERM, SIG_DFL);
+            (void)signal(SIGHUP, SIG_DFL);
+            (void)signal(SIGQUIT, SIG_DFL);
+            (void)signal(SIGTSTP, SIG_IGN);
+            (void)signal(SIGCHLD, SIG_DFL);
+            (void)signal(SIGWINCH, SIG_DFL);
+
+            // Die if parent supervisor exits unexpectedly
+            (void)prctl(PR_SET_PDEATHSIG, (unsigned long)SIGTERM, 0UL, 0UL, 0UL);
+            if (getppid() != parent_pid) {
+                _exit(1);
+            }
+
+            // NOLINTNEXTLINE(clang-analyzer-optin.taint.GenericTaint)
+            if (execv(exec_target, new_argv) == -1) {
+                perror(exec_error);
+                free(new_argv);
+                _exit(127);
+            }
+        }
+
+        if (child_pid > 0) {
+            g_child_pid = child_pid;
+            g_master_fd = master_fd;
+            free(new_argv);
+
+            struct sigaction sa_winch;
+            memset(&sa_winch, 0, sizeof(sa_winch));
+            sa_winch.sa_handler = handle_sigwinch;
+            sa_winch.sa_flags = SA_RESTART;
+            sigemptyset(&sa_winch.sa_mask);
+            (void)sigaction(SIGWINCH, &sa_winch, NULL);
+
+            struct sigaction sa_term;
+            memset(&sa_term, 0, sizeof(sa_term));
+            sa_term.sa_handler = handle_terminate_signal;
+            sa_term.sa_flags = SA_RESTART;
+            sigemptyset(&sa_term.sa_mask);
+            (void)sigaction(SIGTERM, &sa_term, NULL);
+            (void)sigaction(SIGHUP, &sa_term, NULL);
+            (void)sigaction(SIGQUIT, &sa_term, NULL);
+
+            struct sigaction sa_chld;
+            memset(&sa_chld, 0, sizeof(sa_chld));
+            sa_chld.sa_handler = handle_sigchld;
+            sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+            sigemptyset(&sa_chld.sa_mask);
+            (void)sigaction(SIGCHLD, &sa_chld, NULL);
+
+            if (have_termios) {
+                struct termios raw = orig_termios;
+                cfmakeraw(&raw);
+                (void)tcsetattr(tty_fd, TCSANOW, &raw);
+            }
+
+            struct pollfd fds[2];
+            fds[0].fd = STDIN_FILENO;
+            fds[0].events = POLLIN;
+            fds[1].fd = master_fd;
+            fds[1].events = POLLIN;
+
+            char buf[4096];
+            int exit_injected = 0;
+            int64_t exit_injected_time_ms = 0;
+
+            while (!g_child_exited && !g_terminate_requested) {
+                int timeout_ms = exit_injected ? 100 : -1;
+
+                int ret = poll(fds, 2, timeout_ms);
+                if (ret < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    break;
+                }
+
+                // Watchdog timer after /exit is injected
+                if (exit_injected) {
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    int64_t elapsed = ((int64_t)now.tv_sec * 1000L + now.tv_nsec / 1000000L) - exit_injected_time_ms;
+                    if (elapsed > 2000L) { // 2s graceful timeout
+                        (void)kill(child_pid, SIGTERM);
+                        if (elapsed > 2500L) { // 2.5s force kill
+                            (void)kill(child_pid, SIGKILL);
+                        }
+                    }
+                }
+
+                // Read user input
+                if (fds[0].revents & POLLIN) {
+                    ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+                    if (n <= 0) {
+                        break;
+                    }
+
+                    int has_ctrlz = 0;
+                    for (ssize_t i = 0; i < n; i++) {
+                        if (buf[i] == 0x1A) { // Standard Ctrl+Z
+                            has_ctrlz = 1;
+                            break;
+                        }
+                    }
+                    if (!has_ctrlz && n >= 5) {
+                        if (memmem(buf, (size_t)n, "\x1b[122;5u", 8) != NULL ||
+                            memmem(buf, (size_t)n, "\x1b[26u", 5) != NULL) {
+                            has_ctrlz = 1;
+                        }
+                    }
+
+                    if (has_ctrlz) {
+                        if (!exit_injected) {
+                            exit_injected = 1;
+                            struct timespec now;
+                            clock_gettime(CLOCK_MONOTONIC, &now);
+                            exit_injected_time_ms = (int64_t)now.tv_sec * 1000L + now.tv_nsec / 1000000L;
+                            const char exit_cmd[] = "\x03/exit\r";
+                            (void)write(master_fd, exit_cmd, sizeof(exit_cmd) - 1);
+                        }
+                    } else {
+                        (void)write(master_fd, buf, (size_t)n);
+                    }
+                }
+
+                // Read engine output
+                if (fds[1].revents & POLLIN) {
+                    ssize_t n = read(master_fd, buf, sizeof(buf));
+                    if (n <= 0) {
+                        break;
+                    }
+                    (void)write(STDOUT_FILENO, buf, (size_t)n);
+                }
+
+                if (fds[1].revents & (POLLHUP | POLLERR)) {
+                    break;
+                }
+            }
+
+            g_master_fd = -1;
+            close(master_fd);
+
+            // Wait for child to exit
+            int status = 0;
+            (void)waitpid(child_pid, &status, 0);
+            g_child_exited = 1;
+            g_child_exit_status = status;
+
+            // Harvest any lingering process group members (including child PTY group)
+            pid_t self_pid = getpid();
+            pid_t pgrp = getpgrp();
+            kill_process_group_members(child_pid, self_pid, SIGTERM);
+            kill_process_group_members(pgrp, self_pid, SIGTERM);
+            (void)kill(-child_pid, SIGTERM);
+            struct timespec ts_mcp = {.tv_sec = 0, .tv_nsec = 50000000L}; // 50ms
+            (void)nanosleep(&ts_mcp, NULL);
+            kill_process_group_members(child_pid, self_pid, SIGKILL);
+            kill_process_group_members(pgrp, self_pid, SIGKILL);
+            (void)kill(-child_pid, SIGKILL);
+
+            while (waitpid(-1, NULL, WNOHANG) > 0) {
+            }
+
+            if (tty_fd >= 0) {
+                restore_terminal_state(tty_fd, have_termios ? &orig_termios : NULL, orig_pgrp);
+            }
+
+            int exit_code = 0;
+            if (exit_injected) {
+                exit_code = 0;
+            } else if (WIFEXITED(g_child_exit_status)) {
+                exit_code = WEXITSTATUS(g_child_exit_status);
+            } else if (WIFSIGNALED(g_child_exit_status)) {
+                exit_code = 128 + WTERMSIG(g_child_exit_status);
+            }
+            return exit_code;
+        }
+    }
+
+    // Establish a clean process group and maintain terminal foreground control if non-interactive fallback.
+    if (setpgid(0, 0) == 0 && tty_fd >= 0) {
         struct sigaction sa_ttou_ign;
         memset(&sa_ttou_ign, 0, sizeof(sa_ttou_ign));
         sa_ttou_ign.sa_handler = SIG_IGN;
@@ -1256,7 +1548,7 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
         struct sigaction sa_ttou_old;
         memset(&sa_ttou_old, 0, sizeof(sa_ttou_old));
         (void)sigaction(SIGTTOU, &sa_ttou_ign, &sa_ttou_old);
-        (void)tcsetpgrp(STDIN_FILENO, getpid());
+        (void)tcsetpgrp(tty_fd, getpid());
         (void)sigaction(SIGTTOU, &sa_ttou_old, NULL);
     }
 
@@ -1268,17 +1560,25 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
     sigaddset(&block_mask, SIGTERM);
     sigaddset(&block_mask, SIGHUP);
     sigaddset(&block_mask, SIGQUIT);
+    sigaddset(&block_mask, SIGTSTP);
     sigprocmask(SIG_BLOCK, &block_mask, &prev_mask);
 
-    struct sigaction sa_fwd;
-    memset(&sa_fwd, 0, sizeof(sa_fwd));
-    sa_fwd.sa_handler = handle_forward_signal;
-    sa_fwd.sa_flags = SA_RESTART;
-    sigemptyset(&sa_fwd.sa_mask);
-    (void)sigaction(SIGINT, &sa_fwd, NULL);
-    (void)sigaction(SIGTERM, &sa_fwd, NULL);
-    (void)sigaction(SIGHUP, &sa_fwd, NULL);
-    (void)sigaction(SIGQUIT, &sa_fwd, NULL);
+    struct sigaction sa_term;
+    memset(&sa_term, 0, sizeof(sa_term));
+    sa_term.sa_handler = handle_terminate_signal;
+    sa_term.sa_flags = SA_RESTART;
+    sigemptyset(&sa_term.sa_mask);
+    (void)sigaction(SIGTERM, &sa_term, NULL);
+    (void)sigaction(SIGHUP, &sa_term, NULL);
+    (void)sigaction(SIGQUIT, &sa_term, NULL);
+    (void)sigaction(SIGTSTP, &sa_term, NULL);
+
+    struct sigaction sa_int;
+    memset(&sa_int, 0, sizeof(sa_int));
+    sa_int.sa_handler = handle_sigint;
+    sa_int.sa_flags = SA_RESTART;
+    sigemptyset(&sa_int.sa_mask);
+    (void)sigaction(SIGINT, &sa_int, NULL);
 
     struct sigaction sa_chld;
     memset(&sa_chld, 0, sizeof(sa_chld));
@@ -1307,6 +1607,7 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
         (void)signal(SIGTERM, SIG_DFL);
         (void)signal(SIGHUP, SIG_DFL);
         (void)signal(SIGQUIT, SIG_DFL);
+        (void)signal(SIGTSTP, SIG_IGN);
         (void)signal(SIGCHLD, SIG_DFL);
         (void)signal(SIGWINCH, SIG_DFL);
 
@@ -1329,22 +1630,80 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
     g_child_pid = child_pid;
     free(new_argv);
 
-    while (!g_child_exited) {
+    while (!g_child_exited && !g_terminate_requested) {
         sigsuspend(&prev_mask);
     }
 
-    // Broadcast SIGTERM to any lingering processes in our process group (e.g. JVM/Node MCP servers)
-    (void)kill(-getpgrp(), SIGTERM);
+    // If termination was requested (e.g. Ctrl+Z / SIGTSTP, SIGHUP, SIGTERM, SIGQUIT),
+    // cleanly shut down the child engine if it hasn't exited yet.
+    if (g_terminate_requested && !g_child_exited && g_child_pid > 0) {
+        if (g_received_signal == SIGTSTP) {
+            // Under Ctrl+Z / SIGTSTP, do NOT send SIGCONT to avoid triggering Bubble Tea's
+            // p.resume() which re-initializes raw mode and redraws the UI.
+            (void)kill(g_child_pid, SIGKILL);
+            int status = 0;
+            (void)waitpid(g_child_pid, &status, 0);
+            g_child_exited = 1;
+            g_child_exit_status = status;
+        } else {
+            (void)kill(g_child_pid, SIGTERM);
+
+            // Give the child engine up to 300ms to terminate gracefully
+            for (int i = 0; i < 30 && !g_child_exited; i++) {
+                struct timespec ts = {.tv_sec = 0, .tv_nsec = 10000000L}; // 10ms
+                (void)nanosleep(&ts, NULL);
+                int status = 0;
+                pid_t p = waitpid(g_child_pid, &status, WNOHANG);
+                if (p == g_child_pid) {
+                    g_child_exited = 1;
+                    g_child_exit_status = status;
+                    break;
+                }
+            }
+
+            // Force kill child engine if still unresponsive
+            if (!g_child_exited) {
+                (void)kill(g_child_pid, SIGKILL);
+                int status = 0;
+                (void)waitpid(g_child_pid, &status, 0);
+                g_child_exited = 1;
+                g_child_exit_status = status;
+            }
+        }
+    }
+
+    // Broadcast SIGKILL / SIGTERM exclusively to other processes in our process group
+    // (e.g. JVM/Node MCP servers), leaving the supervisor alive to reap them.
+    pid_t self_pid = getpid();
+    pid_t pgrp = getpgrp();
+    if (g_received_signal == SIGTSTP) {
+        kill_process_group_members(pgrp, self_pid, SIGKILL);
+    } else {
+        kill_process_group_members(pgrp, self_pid, SIGTERM);
+        struct timespec ts_mcp = {.tv_sec = 0, .tv_nsec = 50000000L}; // 50ms
+        (void)nanosleep(&ts_mcp, NULL);
+        kill_process_group_members(pgrp, self_pid, SIGKILL);
+    }
 
     // Reap all orphaned grandchildren adopted via PR_SET_CHILD_SUBREAPER
     while (waitpid(-1, NULL, WNOHANG) > 0) {
     }
 
     int exit_code = 0;
-    if (WIFEXITED(g_child_exit_status)) {
+    if (g_terminate_requested) {
+        if (g_received_signal == SIGTSTP) {
+            exit_code = 0;
+        } else if (g_received_signal > 0) {
+            exit_code = 128 + g_received_signal;
+        }
+    } else if (WIFEXITED(g_child_exit_status)) {
         exit_code = WEXITSTATUS(g_child_exit_status);
     } else if (WIFSIGNALED(g_child_exit_status)) {
         exit_code = 128 + WTERMSIG(g_child_exit_status);
+    }
+
+    if (tty_fd >= 0) {
+        restore_terminal_state(tty_fd, have_termios ? &orig_termios : NULL, orig_pgrp);
     }
 
     return exit_code;
@@ -1357,6 +1716,8 @@ int main(int argc, char **argv) {
     char dynamic_loader[PATH_MAX];
     char prefix_path[PATH_MAX];
     char qemu_path[PATH_MAX];
+    char preload_lib[PATH_MAX];
+    const char *preload = NULL;
     const char *prefix = getenv("PREFIX");
     const char *loader = NULL;
     const char *dir = NULL;
@@ -1428,6 +1789,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Check for glibc libtermux-exec wrapper for standard path rewriting (/bin/sh, /usr/bin/env).
+    written =
+        snprintf(preload_lib, sizeof(preload_lib), "%s/glibc/lib/libtermux-exec.so", prefix_path);
+    if (written > 0 && written < (int)sizeof(preload_lib) && access(preload_lib, R_OK) == 0) {
+        preload = preload_lib;
+    }
+
     // Construct path to the patched binary
     written = snprintf(patched_bin, sizeof(patched_bin), "%s/agy.va39", dir);
     if (written < 0 || written >= (int)sizeof(patched_bin)) {
@@ -1435,8 +1803,8 @@ int main(int argc, char **argv) {
     }
 
     // We allocate enough space for: qemu + loader + "--library-path" + lib_path
-    // + patched_bin + user args + NULL
-    int new_argc = argc + 6;
+    // + "--preload" + preload + "--argv0" + "agy" + patched_bin + user args + NULL
+    int new_argc = argc + 10;
     new_argv = malloc((size_t)new_argc * sizeof(*new_argv));
     if (!new_argv) {
         return 1;
@@ -1451,6 +1819,12 @@ int main(int argc, char **argv) {
     new_argv[arg_idx++] = (char *)loader;
     new_argv[arg_idx++] = "--library-path";
     new_argv[arg_idx++] = lib_path;
+    if (preload) {
+        new_argv[arg_idx++] = "--preload";
+        new_argv[arg_idx++] = (char *)preload;
+    }
+    new_argv[arg_idx++] = "--argv0";
+    new_argv[arg_idx++] = "agy";
     new_argv[arg_idx++] = patched_bin;
 
     for (int i = 1; i < argc; i++) {
