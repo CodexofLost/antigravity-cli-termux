@@ -1,98 +1,85 @@
 # Project Context: antigravity-cli-termux
 
-## 1. Quick Specs & Project Cockpit
+## Overview
+- **Repository:** `CodexofLost/antigravity-cli-termux` (Standalone Root Repository)
+- **Upstream Engine:** Google Antigravity CLI (official manifest pipeline)
+- **Target Environment:** Native Android Termux (`linux-aarch64`)
+- **Core Goal:** Provide a relocatable, wrapper-free, glibc-compatible standalone port of the Google Antigravity CLI for Termux on Android devices.
 
-| Dimension | Specification |
-| :--- | :--- |
-| **Identifier** | `CodexofLost/antigravity-cli-termux` (`bin/agy`, `bin/agy.va39`, `bin/libtermux-stat-fix.so`) |
-| **Runtime / Platform** | C (gnu11), Bash 5+, Python 3 / Android Termux (`linux-aarch64`, ARMv8.1-A LSE, fallback QEMU) |
-| **Core Stack** | Termux glibc runtime (`ld-linux-aarch64.so.1`), Bionic libc interposers, Google Antigravity GRTE engine |
-| **Security & Auth** | Google OAuth PKCE (`BROWSER=termux-open-url`), Sigstore OIDC provenance attestations, TLS CA bundle (`$PREFIX/etc/tls/cert.pem`) |
-| **Primary Commands** | Build: `./build.sh` \| CI: `gh workflow run auto-sync-release.yml` \| Smoke: `./bin/agy --help` \| Installer: `bash install.sh` |
+## Upstream Synchronization Architecture
+- **Direct Google Manifest Tracking:**
+  - Google distributes new binary releases via an authenticated Cloud Run JSON manifest (`linux_arm64.json`).
+  - `.github/scripts/check-version.sh` detects new upstream versions directly from Google's manifest and triggers automated build and release publishing on GitHub Actions.
+- **Autonomous Inlined Build Pipeline:**
+  - `.github/workflows/auto-sync-release.yml` builds directly from `CodexofLost/dev` with fully inlined containerized Termux testing (`termux-run.yml`).
+  - 100% self-contained: zero external repository dependencies.
 
-## 2. Component Ownership & Architecture Map
+## Architecture & Components
 
-### Active Source Inventory
-* `build.sh` → `detect_compiler()`, `check_prereqs()`, inline Python VA39 byte-patcher; Orchestrates binary downloads, opcode rewriting, native bootstrapper compilation, and preload library build.
-* `install.sh` → `ensure_dependencies()`, `download_with_progress()`, `spinner()`; Self-healing Termux installer provisioning APT preferences, fetching twin-binaries, and validating environment.
-* `lib/agy_helper.c` → `main()`, `supervise_engine_process()`, `setup_termux_environment()`, `ensure_termux_shell_bridge()`, `perform_transactional_update()`; Relocatable C bootstrapper resolving self-path, sanitizing environments, supervising engine lifecycle as subreaper, and executing in-place updates.
-* `lib/termux_stat_fix.c` → `fstatat()`, `fstatat64()`, `stat()`, `stat64()`, `lstat()`, `lstat64()`, `statx()`, `access()`, `faccessat()`, `opendir()`; LD_PRELOAD interposition shim intercepting `/storage/emulated` calls to synthesize directory entries and eliminate Git dubious ownership / EACCES errors.
-* `.github/scripts/check-version.sh` → `manifest_url`, `manifest_fields`, `build_needed`; Inspects Google Cloud Run manifest (`linux_arm64.json`) to detect new upstream releases.
-* `.github/scripts/generate-release-notes.sh` → `VERSION`, `FORK_CHANGELOG`, `UPSTREAM_NOTES`; Generates release changelog combining fork commits, upstream `CHANGELOG.md` via `mq`, and template substitution.
-* `.github/workflows/auto-sync-release.yml` → `check-and-build`, `release-installer-smoke`, `release-artifact-smoke`, `publish-release`; Autonomous 6-hour cron workflow building, testing in containerized Termux, signing via Sigstore, and publishing releases.
-* `.github/workflows/termux-run.yml` → `workflow_call`, `termux-image: termux/termux-docker-pacman`; Reusable GitHub Actions workflow executing commands inside containerized Termux ARM environment.
-* `.github/release-template.md` → Release notes template with placeholder tokens for version, changelog, and attestation.
-* `logo.ans` → ANSI terminal logo asset displayed during installer execution.
-* `README.md` → Project overview, quickstart installation commands, and architectural documentation.
+### 1. Binary Patching Engine (`build.sh`)
+- **TCMalloc VA39 Patch:**
+  - Android arm64 user space is restricted to 39-bit Virtual Address space (VA39), whereas upstream Google TCMalloc assumes standard Linux 48-bit VA space.
+  - An inline Python script patches arm64 opcodes directly in the official `antigravity` ELF binary:
+    - Bitmask & `ubfx` instructions (`42/44` -> `35/37`, `22/21` -> `29/28`).
+    - Page-alignment constants and `mmap` masks.
+    - Low-level syscall overrides (e.g. `faccessat2` -> `faccessat`).
+  - **Patch Safety Assertions:**
+    - Asserts all critical opcode replacement counts (`ubfx`, `lsl`, `mask`, `mmap`) are strictly greater than zero. Fails the build immediately if upstream binary layout changes to prevent packaging segfaulting binaries.
+  - Output binary: `bin/agy.va39`.
+- Passes `-DAGY_GITHUB_REPO="CodexofLost/antigravity-cli-termux"` to clang when compiling the native bootstrapper.
 
-### Critical Execution Traces
-* **CLI Invocation:** `User runs agy → lib/agy_helper.c:main() cleans LD_PRELOAD/LD_LIBRARY_PATH → setup_termux_environment() sets TLS/DNS/TMPDIR → execv(ld-linux-aarch64.so.1, --library-path, lib_path, agy.va39, ...) → supervise_engine_process() sets subreaper/PDEATHSIG and reaps child processes`
-* **Binary Patching:** `build.sh queries Google manifest → downloads upstream ELF → inline Python scans 4/8/16-byte opcode patterns → rewrites ubfx/lsl/mmap/faccessat2 instructions for 39-bit VA → asserts replacement counts > 0 → writes bin/agy.va39`
-* **In-Place Self-Update:** `agy update → check_and_perform_update() fetches latest GitHub tag → compares semver → perform_transactional_update() downloads archive & sha256 to staging ext4 → validates tar integrity → atomic twin-binary rename with rollback trap → execv(exec_path, argv)`
-* **Storage Interposition:** `Tool accesses /storage/emulated → libtermux-stat-fix.so intercepts fstatat/stat/opendir → returns synthetic 0755 root directory entry → bypasses Android FUSE EACCES / dubious ownership checks`
+### 2. Relocatable C Bootstrapper (`lib/agy_helper.c`)
+- Compiles via `$PREFIX/bin/clang` to `bin/agy`.
+- **Runtime Environment Isolation & Preload Bridging:**
+  - Unsets conflicting Android Bionic preloads (`LD_PRELOAD`, `LD_LIBRARY_PATH`) that cause `invalid ELF header` panics in glibc.
+  - Auto-detects glibc-native `libtermux-exec.so` (`$PREFIX/glibc/lib/libtermux-exec.so`) and passes `--preload` to `ld-linux`. This transparently intercepts `execve()` to redirect `/bin/sh`, `/bin/bash`, and `/usr/bin/env` without breaking, while cleanly stripping preloads when invoking Bionic binaries.
+  - Sets `--argv0 agy` on the glibc dynamic linker so process name and CLI usage display cleanly as `agy`.
+  - Sets `SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem` and `GODEBUG=netdns=cgo`.
+  - Configures `NODE_EXTRA_CA_CERTS=$PREFIX/etc/tls/cert.pem` for Node.js MCP server TLS verification.
+  - Ensures `TMPDIR=$PREFIX/tmp` and `XDG_RUNTIME_DIR=$PREFIX/tmp` exist with permissions `0700` (avoiding Android system `/tmp` 0771 permission denials, FUSE socket bind failures, and 108-byte sockaddr_un path overflows).
+  - Explicitly injects `ANTIGRAVITY_AGENTAPI_EXE=$PREFIX/bin/agy` to prevent Go's `/proc/self/exe` resolution from defaulting to `ld-linux-aarch64.so.1`.
+  - Automatically installs and maintains `$PREFIX/bin/agentapi`, self-heals corrupted `~/.gemini/antigravity-cli/bin/agentapi` shims, atomically wraps standalone auxiliary GRTE binaries (`webm_encoder` in `~/.gemini/antigravity-cli/bin/webm_encoder`) via glibc dynamic loader wrappers, and relies on native Termux `ripgrep` (`$PREFIX/bin/rg`) via `$PATH` for NEON-accelerated Bionic code search.
+  - Automatically builds, installs, and injects `libtermux-stat-fix.so` into `termux-shell` and `termux-shell-env`, intercepting `fstatat`/`stat`/`lstat`/`statx` for `/storage/emulated` (including trailing slash paths) with strict POSIX compliance to completely eliminate Git 2.35+ `fatal: detected dubious ownership` failures across Android shared storage (`/storage/emulated/0`).
+  - Sets `GIT_DISCOVERY_ACROSS_FILESYSTEM=1` to allow git discovery across Android shared storage (`/storage/emulated/0`) FUSE mount boundaries.
+  - Sets `BROWSER=termux-open-url` (if unset) for native Android browser launch in OAuth authentication.
+  - Guarantees UTF-8 locale (`LANG=en_US.UTF-8` fallback).
+  - Automatically bootstraps Termux storage symlink hierarchy (`$HOME/storage/shared -> /storage/emulated/0`) on startup if accessible, or emits a friendly one-line permission notice if ungranted.
+  - Dynamically synchronizes active Android system DNS properties (`net.dns1`, `net.dns2`) into `$PREFIX/etc/resolv.conf` and ensures `$PREFIX/glibc/etc/resolv.conf` symlinking, falling back to public nameservers (`1.1.1.1`, `8.8.8.8`) when properties are absent or on captive portals.
+  - Verifies presence of `$PREFIX/etc/hosts`, automatically writing `localhost` and `ip6-localhost` mappings if missing.
+  - Validates native Termux environment across interactive GUI, subshell, `tmux`, and OpenSSH (`sshd`) sessions without crashing.
+- **Process Group, Subreaper & Zombie Supervision:**
+  - Designates bootstrapper as subreaper via `prctl(PR_SET_CHILD_SUBREAPER, 1)` to adopt and reap orphaned grandchildren (such as JVM `maven-tools-mcp.jar` or background Node.js processes).
+  - Establishes a dedicated process group (`setpgid(0, 0)`) and safely preserves interactive foreground terminal ownership (`tcsetpgrp`).
+  - Sets `prctl(PR_SET_PDEATHSIG, SIGTERM)` on child engine to ensure clean teardown if parent terminates.
+  - In interactive TTY sessions, utilizes a transparent `forkpty` proxy to intercept `Ctrl+Z` (`0x1A` and Kitty `\x1b[122;5u` / `\x1b[26u`) and inject `\x03/exit\r` directly into Antigravity's standard input. This triggers Antigravity's authentic `/exit` application command sequence natively—gracefully shutting down MCP servers over JSON-RPC, closing pipes, flushing session transcripts, and cleanly exiting `0` without abrupt external `SIGKILL` termination. Includes a 2-second fallback watchdog to guarantee exit responsiveness.
+  - Non-blocking `waitpid(-1, &status, WNOHANG)` and subreaper supervision harvest any orphaned MCP processes, while transparently synchronizing terminal resize (`SIGWINCH` / `TIOCSWINSZ`) and restoring canonical terminal attributes (`TCSAFLUSH`, `\r\033[2K\033[J`, Kitty keyboard protocol reset). Non-interactive invocations automatically bypass the PTY proxy.
+- **Subshell Shebang Execution Bridge & Non-Interactive Environment:**
+  - Automatically manages `$PREFIX/libexec/agy/termux-shell` (executable `0755`) and `$PREFIX/libexec/agy/termux-shell-env`.
+  - Sets `SHELL=$PREFIX/libexec/agy/termux-shell`, `BASH_ENV=$PREFIX/libexec/agy/termux-shell-env`, `ENV=$PREFIX/libexec/agy/termux-shell-env`, and `AGY_REAL_SHELL` to the user's real shell (bash/zsh).
+  - Ensures all child shells (interactive and non-interactive `bash -c` / `sh -c`), subagents, and MCP background processes inherit Bionic's `libtermux-exec.so` and `libtermux-stat-fix.so`, `ANTIGRAVITY_AGENTAPI_EXE`, `TMPDIR`, and `XDG_RUNTIME_DIR`, preventing `bad interpreter` errors on shebangs, non-terminating `agentapi` function calls, and ensuring seamless Git execution across shared storage.
+- **Hardware Capability Detection:**
+  - Checks ARMv8.1-A LSE atomics (`HWCAP_ATOMICS`) via `getauxval(AT_HWCAP)`.
+  - Falls back to running engine under `$PREFIX/bin/qemu-aarch64` if LSE is unsupported.
+- **Resilient Transactional Self-Update & Semantic Versioning:**
+  - Configurable repository targeting: uses `CodexofLost/antigravity-cli-termux` by default, with dynamic runtime override via `AGY_UPDATE_REPO` (validated against shell metacharacters to prevent injection).
+  - Resilient network fetching: bounded curl downloads with `--connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2`.
+  - Pre-extraction archive integrity validation via `tar -tzf` and optional SHA256 checksum verification (`.sha256`).
+  - Guaranteed ext4 staging (`$install_dir/../tmp`) preventing Android shared storage `noexec` execution check failures.
+  - In-place atomic zero-copy `mv` replacements saving 400MB of flash writes per update.
+  - Startup update check automatically re-execs `execv(exec_path, argv)` so newly installed bootstrapper features activate immediately.
+  - Intercepts `agy update` (and startup checks) to stage and replace `agy`, `agy.va39`, and `libtermux-stat-fix.so` with rollback safety.
 
-## 3. Domain & Technical Specifications
+### 3. Self-Healing Installer (`install.sh`)
+- Enforces native Termux validation (rejects PRoot).
+- `ensure_dependencies()` automatically checks and installs required Termux packages: `glibc`, `glibc-repo`, `resolv-conf`, `ca-certificates`, `termux-exec-glibc`, `termux-exec`, `termux-tools` via `pkg`.
+- **Precision APT Preferences Pinning:** Automatically provisions `$PREFIX/etc/apt/preferences.d/no-shadow-glibc` during dependency setup. Pins the 12 TUR shadow utilities (`glibc-runner`, `bash-glibc`, `coreutils-glibc`, etc.) to priority `-1` while maintaining `glibc` and `termux-exec-glibc` at priority `500`. This prevents `pkg upgrade` and `dist-upgrade` from force-installing 400MB+ of unwanted packages while ensuring users automatically receive `glibc` bug fixes/upgrades and can install other glibc tools on demand.
+- Auto-generates fallback `resolv.conf` and `hosts` if not present.
+- Ensures `$PREFIX/tmp` exists with secure `0700` permissions.
+- Installs twin binaries (`agy`, `agy.va39`) and `agentapi` CLI bridge to `$PREFIX/bin/`.
 
-* **Endpoints & Services:**
-  - Upstream Release Manifest: `https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json` (HTTPS/JSON; fields `.version`, `.url`).
-  - Upstream Changelog: `https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md`.
-  - GitHub Releases API: `https://github.com/<AGY_GITHUB_REPO>/releases/latest` (HTTP 302 location header extraction).
-  - Release Asset Download: `https://github.com/<AGY_GITHUB_REPO>/releases/download/<tag>/antigravity-termux-standalone.tar.gz` and `.sha256`.
-* **Data Schemas & Persistence:**
-  - APT Preferences: `$PREFIX/etc/apt/preferences.d/no-shadow-glibc` (Pins 12 TUR shadow packages to priority `-1` to prevent 400MB+ unwanted package bloat).
-  - DNS Configuration: `$PREFIX/etc/resolv.conf` synchronized from Android system properties (`net.dns1`, `net.dns2`) with public fallback (`1.1.1.1`, `8.8.8.8`); symlinked to `$PREFIX/glibc/etc/resolv.conf`.
-  - Synthetic Emulated Storage: `$PREFIX/tmp/.synthetic_emulated` symlinked to `/storage/emulated/0`.
-  - Subshell Execution Bridge: `$PREFIX/libexec/agy/termux-shell` (0755), `$PREFIX/libexec/agy/termux-shell-env` (0644).
-  - Agent API CLI Shim: `$PREFIX/bin/agentapi` and `~/.gemini/antigravity-cli/bin/agentapi` (0755; self-healed to dispatch through `$PREFIX/bin/agy agentapi`).
-* **Security & Auth:**
-  - CA Certificates: `$PREFIX/etc/tls/cert.pem` mapped to `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`.
-  - Cryptographic Provenance: Sigstore Keyless OIDC build attestation verified via `gh attestation verify antigravity-termux-standalone.tar.gz -R <repo>`.
-  - Temp Directory Hardening: `$PREFIX/tmp` created with permission `0700` preventing Android `/tmp` (0771) write permission denial.
-
-## 4. Architectural Invariants & Guardrails
-
-* **State Ownership:**
-  - Single Standalone Authority: All execution relies entirely on local Termux filesystem state; zero external repository submodules or wrappers.
-  - Process Subreaper Ownership: The `agy` bootstrapper sets `PR_SET_CHILD_SUBREAPER` and dedicated process group (`setpgid(0, 0)`), adopting and reaping all orphaned grandchild processes (Node.js/JVM MCP servers) via non-blocking `waitpid` on `SIGCHLD`.
-* **Boundaries & Subsystem Isolation:**
-  - Bionic vs. Glibc Boundary: Android Bionic preloads (`LD_PRELOAD`, `LD_LIBRARY_PATH`) must remain unset when invoking the glibc dynamic linker (`ld-linux-aarch64.so.1`) to avoid `invalid ELF header` panics.
-  - Child Shell Inheritance: Subshells spawned by the engine execute through `$PREFIX/libexec/agy/termux-shell` with `libtermux-exec.so` and `libtermux-stat-fix.so` re-injected, guaranteeing POSIX shebang resolution and shared storage compatibility without leaking glibc preloads to Bionic binaries.
-  - Memory VA39 Ceiling: ARM64 user space is constrained to 39-bit virtual addressing; critical opcode substitutions (`ubfx`, `lsl`, `mmap`, `faccessat2`) must have match count > 0 or build aborts.
-* **Budgets & Guardrails:**
-  - Flash Endurance: In-place update uses staging rename (`mv -f`), saving ~400MB flash rewrites per upgrade cycle.
-  - Network Timeouts: GitHub release checks bounded to 2s connect / 5s max time; downloads bounded to 15s connect / 300s max time with 3 retries.
-  - Rollback Safety: Staged update trapped on `EXIT`/`INT`/`TERM`—if replacement fails before commit, original binaries are restored immediately; exits with code `125` if rollback fails.
-
-## 5. End-to-End Data & State Flow Pipelines
-
-* **Ingress & Patching Pipeline:**
-  `Google Manifest → curl download → tar extraction → Python byte-patcher (match ubfx/lsl/mmap) → bin/agy.va39 → clang compile lib/agy_helper.c & lib/termux_stat_fix.c → bin/agy & bin/libtermux-stat-fix.so → smoke test (--help) → release archive`
-* **Runtime Execution Pipeline:**
-  `User invocation (agy) → check LSE (AT_HWCAP) → sanitize preloads (unset LD_PRELOAD) → setup TLS/DNS/TMPDIR → bridge termux-shell → spawn glibc dynamic loader → execute agy.va39 → supervise process group & reap defunct grandchildren`
-* **Update & Self-Healing Pipeline:**
-  `Startup/agy update → query GitHub latest release → parse semantic version → compare against AGY_TERMUX_VERSION → download archive & sha256 to staging ext4 → tar -tzf verify → stage to .agy.new.$$ → backup to .agy.old.$$ → atomic mv commit → self-heal ~/.gemini agentapi shims & auxiliary GRTE binaries → re-execv`
-
-## 6. UI/UX Design System & Tokens
-
-* `N/A`: Headless terminal CLI binary and TUI application. Terminal color sequences follow ANSI standard palette (bold, dim, green, red, cyan) for installer spinners, progress bars, and update notices.
-
-## 7. Build, Verification & Diagnostic Recipes
-
-* **Build (Local compile):**
-  ```bash
-  ./build.sh
-  ```
-* **CI/CD (Cloud workflow dispatch):**
-  ```bash
-  gh workflow run auto-sync-release.yml -f dry_run=false
-  ```
-* **Test (Twin-binary verification & smoke test):**
-  ```bash
-  ./bin/agy --help && ./bin/agy --version
-  ```
-* **Diagnostics (LSE atomics, glibc loader, and resolver status):**
-  ```bash
-  grep -q "atomics" /proc/cpuinfo && echo "LSE supported" || echo "LSE missing"
-  test -x "${PREFIX:-/data/data/com.termux/files/usr}/glibc/lib/ld-linux-aarch64.so.1" && echo "Glibc loader OK"
-  cat "${PREFIX:-/data/data/com.termux/files/usr}/etc/resolv.conf"
-  ```
+### 4. CI/CD & Automation (`.github/workflows/`)
+- `auto-sync-release.yml`: 6-hour cron check directly against Google Cloud Run release manifest (`linux_arm64.json`).
+- Autonomous pipeline builds directly from `CodexofLost/dev` without auto-merging upstream port.
+- Cross-compilation & automated building.
+- Containerized Termux smoke testing (`termux-run.yml`).
+- Attested GitHub Release creation via Sigstore.
