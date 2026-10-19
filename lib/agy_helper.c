@@ -472,7 +472,7 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "trap cleanup EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; "
         "curl --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 300 --retry 3 "
         "--retry-delay 2 "
-        "-fLsL -o \"$tmp/antigravity-termux-standalone.tar.gz\" "
+        "-fL --progress-bar -o \"$tmp/antigravity-termux-standalone.tar.gz\" "
         "\"https://github.com/%s/releases/download/"
         "$release_tag/antigravity-termux-standalone.tar.gz\" && "
         "sha_url=\"https://github.com/%s/releases/download/"
@@ -490,7 +490,7 @@ static int perform_transactional_update(const char *dir, const char *latest_tag)
         "agy agy.va39 libtermux-stat-fix.so && "
         "test -s \"$tmp/agy\" && test -x \"$tmp/agy\" && "
         "test -s \"$tmp/agy.va39\" && test -x \"$tmp/agy.va39\" && "
-        "\"$tmp/agy\" --help >/dev/null 2>&1 && "
+        "\"$tmp/agy\" --version </dev/null >/dev/null 2>&1 && "
         "install -m 0755 \"$tmp/agy\" \"$new_agy\" && "
         "install -m 0755 \"$tmp/agy.va39\" \"$new_payload\" && "
         "[ ! -f \"$tmp/libtermux-stat-fix.so\" ] || "
@@ -1302,13 +1302,7 @@ static void restore_terminal_state(int tty_fd, const struct termios *orig_termio
     (void)write(tty_fd, reset_seq, sizeof(reset_seq) - 1);
 
     // Flush unread input queue and restore original terminal attributes
-    if (orig_termios != NULL) {
-        (void)tcflush(tty_fd, TCIFLUSH);
-        (void)tcsetattr(tty_fd, TCSAFLUSH, orig_termios);
-    }
-
-    // Return foreground terminal control to parent shell
-    if (orig_pgrp > 0) {
+    if (orig_termios != NULL || orig_pgrp > 0) {
         struct sigaction sa_ttou_ign;
         memset(&sa_ttou_ign, 0, sizeof(sa_ttou_ign));
         sa_ttou_ign.sa_handler = SIG_IGN;
@@ -1316,13 +1310,34 @@ static void restore_terminal_state(int tty_fd, const struct termios *orig_termio
         struct sigaction sa_ttou_old;
         memset(&sa_ttou_old, 0, sizeof(sa_ttou_old));
         (void)sigaction(SIGTTOU, &sa_ttou_ign, &sa_ttou_old);
-        (void)tcsetpgrp(tty_fd, orig_pgrp);
+
+        if (orig_termios != NULL) {
+            (void)tcflush(tty_fd, TCIFLUSH);
+            (void)tcsetattr(tty_fd, TCSAFLUSH, orig_termios);
+        }
+
+        if (orig_pgrp > 0) {
+            (void)tcsetpgrp(tty_fd, orig_pgrp);
+        }
         (void)sigaction(SIGTTOU, &sa_ttou_old, NULL);
     }
 }
 
+static int should_use_pty_proxy(int argc, char **argv, int tty_fd) {
+    if (tty_fd < 0 || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        return 0;
+    }
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0 ||
+            strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int supervise_engine_process(const char *exec_target, char **new_argv,
-                                    const char *exec_error) {
+                                    const char *exec_error, int argc, char **argv) {
     // Designate this bootstrapper as a subreaper to adopt orphaned grandchildren.
     (void)prctl(PR_SET_CHILD_SUBREAPER, 1UL, 0UL, 0UL, 0UL);
 
@@ -1348,7 +1363,7 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
 
     // Interactive terminal session: use a PTY forwarder to intercept Ctrl+Z
     // and naturally trigger Antigravity's authentic /exit command.
-    if (tty_fd >= 0 && isatty(STDIN_FILENO)) {
+    if (should_use_pty_proxy(argc, argv, tty_fd)) {
         struct winsize ws;
         int have_ws = 0;
         if (ioctl(tty_fd, TIOCGWINSZ, &ws) == 0) {
@@ -1411,9 +1426,19 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
             (void)sigaction(SIGCHLD, &sa_chld, NULL);
 
             if (have_termios) {
+                struct sigaction sa_ttou_ign;
+                memset(&sa_ttou_ign, 0, sizeof(sa_ttou_ign));
+                sa_ttou_ign.sa_handler = SIG_IGN;
+                sigemptyset(&sa_ttou_ign.sa_mask);
+                struct sigaction sa_ttou_old;
+                memset(&sa_ttou_old, 0, sizeof(sa_ttou_old));
+                (void)sigaction(SIGTTOU, &sa_ttou_ign, &sa_ttou_old);
+
                 struct termios raw = orig_termios;
                 cfmakeraw(&raw);
                 (void)tcsetattr(tty_fd, TCSANOW, &raw);
+
+                (void)sigaction(SIGTTOU, &sa_ttou_old, NULL);
             }
 
             struct pollfd fds[2];
@@ -1508,16 +1533,13 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
             g_child_exited = 1;
             g_child_exit_status = status;
 
-            // Harvest any lingering process group members (including child PTY group)
+            // Harvest any lingering process group members in child PTY group
             pid_t self_pid = getpid();
-            pid_t pgrp = getpgrp();
             kill_process_group_members(child_pid, self_pid, SIGTERM);
-            kill_process_group_members(pgrp, self_pid, SIGTERM);
             (void)kill(-child_pid, SIGTERM);
             struct timespec ts_mcp = {.tv_sec = 0, .tv_nsec = 50000000L}; // 50ms
             (void)nanosleep(&ts_mcp, NULL);
             kill_process_group_members(child_pid, self_pid, SIGKILL);
-            kill_process_group_members(pgrp, self_pid, SIGKILL);
             (void)kill(-child_pid, SIGKILL);
 
             while (waitpid(-1, NULL, WNOHANG) > 0) {
@@ -1676,13 +1698,19 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
     // (e.g. JVM/Node MCP servers), leaving the supervisor alive to reap them.
     pid_t self_pid = getpid();
     pid_t pgrp = getpgrp();
-    if (g_received_signal == SIGTSTP) {
-        kill_process_group_members(pgrp, self_pid, SIGKILL);
-    } else {
-        kill_process_group_members(pgrp, self_pid, SIGTERM);
-        struct timespec ts_mcp = {.tv_sec = 0, .tv_nsec = 50000000L}; // 50ms
-        (void)nanosleep(&ts_mcp, NULL);
-        kill_process_group_members(pgrp, self_pid, SIGKILL);
+    if (g_child_pid > 0) {
+        (void)kill(g_child_pid, SIGTERM);
+        (void)kill(-g_child_pid, SIGTERM);
+    }
+    if (pgrp == self_pid) {
+        if (g_received_signal == SIGTSTP) {
+            kill_process_group_members(pgrp, self_pid, SIGKILL);
+        } else {
+            kill_process_group_members(pgrp, self_pid, SIGTERM);
+            struct timespec ts_mcp = {.tv_sec = 0, .tv_nsec = 50000000L}; // 50ms
+            (void)nanosleep(&ts_mcp, NULL);
+            kill_process_group_members(pgrp, self_pid, SIGKILL);
+        }
     }
 
     // Reap all orphaned grandchildren adopted via PR_SET_CHILD_SUBREAPER
@@ -1832,5 +1860,5 @@ int main(int argc, char **argv) {
     }
     new_argv[arg_idx] = NULL;
 
-    return supervise_engine_process(exec_target, new_argv, exec_error);
+    return supervise_engine_process(exec_target, new_argv, exec_error, argc, argv);
 }
