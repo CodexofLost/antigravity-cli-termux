@@ -890,79 +890,6 @@ static void ensure_installed_agentapi(const char *prefix) {
     }
 }
 
-static void wrap_grte_binary_if_needed(const char *binary_path, const char *prefix) {
-    char header[4096] = {0};
-    FILE *fp = fopen(binary_path, "rb");
-    if (fp == NULL) {
-        return;
-    }
-    size_t read_bytes = fread(header, 1, sizeof(header), fp);
-    (void)fclose(fp);
-
-    // Only wrap unpatched raw ELF binaries (\x7fELF)
-    if (read_bytes < 4 || header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' ||
-        header[3] != 'F') {
-        return;
-    }
-
-    // Verify it is a glibc/GRTE dynamic binary before wrapping
-    if (memmem(header, read_bytes, "ld-linux", 8) == NULL &&
-        memmem(header, read_bytes, "grte", 4) == NULL) {
-        return;
-    }
-
-    char real_path[PATH_MAX];
-    char tmp_path[PATH_MAX];
-    if (snprintf(real_path, sizeof(real_path), "%s.real", binary_path) >= (int)sizeof(real_path) ||
-        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", binary_path, (int)getpid()) >=
-            (int)sizeof(tmp_path)) {
-        return;
-    }
-
-    // Move raw ELF to <path>.real
-    if (rename(binary_path, real_path) != 0) {
-        return;
-    }
-
-    // Write launcher script atomically invoking Termux glibc loader with cleared Bionic preloads
-    fp = fopen(tmp_path, "w");
-    if (fp == NULL) {
-        (void)rename(real_path, binary_path);
-        return;
-    }
-
-    (void)fprintf(fp,
-                  "#!%s/bin/sh\n"
-                  "unset LD_PRELOAD\n"
-                  "unset LD_LIBRARY_PATH\n"
-                  "_target=\"$0.real\"\n"
-                  "[ -f \"$_target\" ] || _target=\"$(dirname \"$0\")/$(basename \"$0\").real\"\n"
-                  "exec \"%s/glibc/lib/ld-linux-aarch64.so.1\" --library-path \"%s/glibc/lib\" "
-                  "\"$_target\" \"$@\"\n",
-                  prefix, prefix, prefix);
-    (void)fclose(fp);
-    (void)chmod(tmp_path, 0755);
-
-    if (rename(tmp_path, binary_path) != 0) {
-        (void)unlink(tmp_path);
-        (void)rename(real_path, binary_path);
-    }
-}
-
-static void self_heal_auxiliary_binaries(const char *prefix) {
-    const char *home = getenv("HOME");
-    if (home == NULL || home[0] == '\0') {
-        home = "/data/data/com.termux/files/home";
-    }
-
-    // Self-heal webm_encoder in ~/.gemini/antigravity-cli/bin/
-    char webm_path[PATH_MAX];
-    if (snprintf(webm_path, sizeof(webm_path), "%s/.gemini/antigravity-cli/bin/webm_encoder",
-                 home) < (int)sizeof(webm_path)) {
-        wrap_grte_binary_if_needed(webm_path, prefix);
-    }
-}
-
 static void ensure_termux_shell_bridge(const char *prefix) {
     char dir_path[PATH_MAX];
     char script_path[PATH_MAX];
@@ -1152,9 +1079,8 @@ static void setup_termux_environment(const char *prefix) {
     ensure_installed_agentapi(prefix);
     self_heal_agentapi_shim(prefix);
 
-    // Heal embedded auxiliary GRTE binaries (ripgrep, webm_encoder) for native Termux glibc
-    // execution.
-    self_heal_auxiliary_binaries(prefix);
+    // Disable embedded GRTE ripgrep so searches use native Termux rg on PATH.
+    setenv("ANTIGRAVITY_DISABLE_EMBEDDED_RIPGREP", "true", 0);
 
     // Bridge subshell execution so child scripts with Unix shebangs work properly.
     ensure_termux_shell_bridge(prefix);
@@ -1329,7 +1255,9 @@ static int should_use_pty_proxy(int argc, char **argv, int tty_fd) {
     }
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0 ||
-            strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0 ||
+            strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--print") == 0 ||
+            strcmp(argv[i], "acp") == 0) {
             return 0;
         }
     }
@@ -1730,8 +1658,16 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
         exit_code = 128 + WTERMSIG(g_child_exit_status);
     }
 
-    if (tty_fd >= 0) {
-        restore_terminal_state(tty_fd, have_termios ? &orig_termios : NULL, orig_pgrp);
+    if (tty_fd >= 0 && orig_pgrp > 0) {
+        struct sigaction sa_ttou_ign;
+        memset(&sa_ttou_ign, 0, sizeof(sa_ttou_ign));
+        sa_ttou_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ttou_ign.sa_mask);
+        struct sigaction sa_ttou_old;
+        memset(&sa_ttou_old, 0, sizeof(sa_ttou_old));
+        (void)sigaction(SIGTTOU, &sa_ttou_ign, &sa_ttou_old);
+        (void)tcsetpgrp(tty_fd, orig_pgrp);
+        (void)sigaction(SIGTTOU, &sa_ttou_old, NULL);
     }
 
     return exit_code;
