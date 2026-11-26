@@ -1290,7 +1290,7 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
     }
 
     // Interactive terminal session: use a PTY forwarder to intercept Ctrl+Z
-    // and naturally trigger Antigravity's authentic /exit command.
+    // and trigger Antigravity's native double-Ctrl+C exit flow cleanly.
     if (should_use_pty_proxy(argc, argv, tty_fd)) {
         struct winsize ws;
         int have_ws = 0;
@@ -1378,9 +1378,14 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
             char buf[4096];
             int exit_injected = 0;
             int64_t exit_injected_time_ms = 0;
+            int exit_ctrlc_sent = 0;
+            int64_t last_ctrlc_time_ms = 0;
 
             while (!g_child_exited && !g_terminate_requested) {
-                int timeout_ms = exit_injected ? 100 : -1;
+                int timeout_ms = -1;
+                if (exit_injected) {
+                    timeout_ms = (exit_ctrlc_sent < 4) ? 25 : 100;
+                }
 
                 int ret = poll(fds, 2, timeout_ms);
                 if (ret < 0) {
@@ -1390,11 +1395,27 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
                     break;
                 }
 
-                // Watchdog timer after /exit is injected
+                // Drive spaced Ctrl+C exit pulses while Bubble Tea stays in raw mode,
+                // plus watchdog fallback if shutdown stalls.
                 if (exit_injected) {
                     struct timespec now;
                     clock_gettime(CLOCK_MONOTONIC, &now);
-                    int64_t elapsed = ((int64_t)now.tv_sec * 1000L + now.tv_nsec / 1000000L) - exit_injected_time_ms;
+                    int64_t now_ms = ((int64_t)now.tv_sec * 1000L) + (now.tv_nsec / 1000000L);
+
+                    if (exit_ctrlc_sent < 4 && (now_ms - last_ctrlc_time_ms) >= 50L) {
+                        struct termios slave_t;
+                        if (tcgetattr(master_fd, &slave_t) == 0 &&
+                            (slave_t.c_lflag & ICANON) == 0) {
+                            const char ctrlc = '\x03';
+                            (void)write(master_fd, &ctrlc, 1);
+                            exit_ctrlc_sent++;
+                            last_ctrlc_time_ms = now_ms;
+                        } else {
+                            exit_ctrlc_sent = 4;
+                        }
+                    }
+
+                    int64_t elapsed = now_ms - exit_injected_time_ms;
                     if (elapsed > 2000L) { // 2s graceful timeout
                         (void)kill(child_pid, SIGTERM);
                         if (elapsed > 2500L) { // 2.5s force kill
@@ -1429,9 +1450,13 @@ static int supervise_engine_process(const char *exec_target, char **new_argv,
                             exit_injected = 1;
                             struct timespec now;
                             clock_gettime(CLOCK_MONOTONIC, &now);
-                            exit_injected_time_ms = (int64_t)now.tv_sec * 1000L + now.tv_nsec / 1000000L;
-                            const char exit_cmd[] = "\x03/exit\r";
-                            (void)write(master_fd, exit_cmd, sizeof(exit_cmd) - 1);
+                            int64_t now_ms =
+                                ((int64_t)now.tv_sec * 1000L) + (now.tv_nsec / 1000000L);
+                            exit_injected_time_ms = now_ms;
+                            last_ctrlc_time_ms = now_ms;
+                            exit_ctrlc_sent = 1;
+                            const char ctrlc = '\x03';
+                            (void)write(master_fd, &ctrlc, 1);
                         }
                     } else {
                         (void)write(master_fd, buf, (size_t)n);
